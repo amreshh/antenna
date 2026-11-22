@@ -658,8 +658,12 @@ jobs:
           base64 -d <<< "$KEYSTORE_BASE64" > "$keystore"
           apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
           mkdir -p dist
+          # No v4 signature: it's only for streamed installs (adb install
+          # --incremental), and apksigner would write it as an extra .idsig file
+          # that ends up in the release. Android checks the v2/v3 signatures.
           "$apksigner" sign --ks "$keystore" --ks-key-alias "$KEY_ALIAS" \
             --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+            --v4-signing-enabled false \
             --out "dist/antenna-v$VERSION.apk" "apk/antenna-v$VERSION.apk"
 
       # Fails if the APK isn't signed with the release key. Prints the

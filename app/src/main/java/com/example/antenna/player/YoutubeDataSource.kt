@@ -202,7 +202,7 @@ class YoutubeDataSource(private val client: OkHttpClient) : BaseDataSource(/* is
         }
 
         response = resp
-        input = resp.body?.byteStream()
+        input = resp.body.byteStream()
 
         // Server ignored our Range header and sent the whole file: skip ahead manually.
         if (rangeHeader != null && resp.code == 200) {

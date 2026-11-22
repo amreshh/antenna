@@ -58,7 +58,7 @@ class SponsorBlockClient(private val http: OkHttpClient) {
                 http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
                     // 404 just means "no segments for this prefix"
                     if (!resp.isSuccessful) return@use emptyList<Segment>()
-                    val body = resp.body?.string() ?: return@use emptyList<Segment>()
+                    val body = resp.body.string()
                     parse(body, videoId)
                 }
             } catch (e: Exception) {
