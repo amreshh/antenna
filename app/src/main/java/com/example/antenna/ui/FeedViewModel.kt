@@ -1,6 +1,7 @@
 package com.example.antenna.ui
 
 import android.app.Application
+import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.antenna.data.Channel
@@ -9,12 +10,16 @@ import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.parseTakeoutCsv
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import java.io.ByteArrayOutputStream
+import java.io.IOException
 
 data class FeedUiState(
     val items: List<VideoItem> = emptyList(),
@@ -24,6 +29,9 @@ data class FeedUiState(
     val failedChannels: List<String> = emptyList(),
     val error: String? = null,
 )
+
+/** A subscriptions.csv is about 100 bytes per channel. */
+private const val MAX_IMPORT_BYTES = 5 * 1024 * 1024
 
 class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -47,8 +55,41 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
     fun unsubscribe(channel: Channel) = store.unsubscribe(channel.url)
 
-    /** Imports a Google Takeout subscriptions.csv. Returns how many channels were new. */
-    fun importTakeout(csv: String): Int = store.addAll(parseTakeoutCsv(csv))
+    /**
+     * Imports a Google Takeout subscriptions.csv. The file is read off the main thread: it
+     * may come from a cloud provider that downloads it first. [onResult] gets a message.
+     */
+    fun importTakeout(uri: Uri, onResult: (String) -> Unit) {
+        viewModelScope.launch {
+            val message = try {
+                val csv = withContext(Dispatchers.IO) { readText(uri) }
+                val added = store.addAll(parseTakeoutCsv(csv))
+                if (added == 0) "No new channels found in that file" else "Imported $added channels"
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                "Couldn't read that file: ${e.message}"
+            }
+            onResult(message)
+        }
+    }
+
+    /** The file's text, refusing anything far bigger than a subscriptions.csv. */
+    private fun readText(uri: Uri): String {
+        val input = getApplication<Application>().contentResolver.openInputStream(uri)
+            ?: throw IOException("it couldn't be opened")
+        return input.use { stream ->
+            val out = ByteArrayOutputStream()
+            val buffer = ByteArray(8192)
+            while (true) {
+                val n = stream.read(buffer)
+                if (n < 0) break
+                out.write(buffer, 0, n)
+                if (out.size() > MAX_IMPORT_BYTES) throw IOException("it's over 5 MB, too big for a subscriptions.csv")
+            }
+            out.toString(Charsets.UTF_8.name())
+        }
+    }
 
     /** Drops removed channels locally and fetches only newly added ones. */
     private fun sync(list: List<Channel>) {

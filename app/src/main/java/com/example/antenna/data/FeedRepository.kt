@@ -65,7 +65,6 @@ object FeedRepository {
 
     private fun fromRss(channel: Channel): List<VideoItem> {
         val extractor = ServiceList.YouTube.getFeedExtractor(channel.url)
-            ?: error("No feed extractor")
         extractor.fetchPage()
         return extractor.initialPage.items
             .filterIsInstance<StreamInfoItem>()

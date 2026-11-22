@@ -3,6 +3,7 @@ package com.example.antenna.data
 import android.text.format.DateUtils
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import org.schabi.newpipe.extractor.Image
 import org.schabi.newpipe.extractor.InfoItem
 import org.schabi.newpipe.extractor.ListExtractor.InfoItemsPage
 import org.schabi.newpipe.extractor.Page
@@ -61,11 +62,7 @@ fun StreamInfoItem.toVideoItem(fallbackUploader: String = ""): VideoItem = Video
     title = name,
     uploader = uploaderName?.takeIf { it.isNotBlank() } ?: fallbackUploader,
     durationSeconds = duration,
-    // pick a mid-size thumbnail; the largest ones are wasteful for a list
-    thumbnailUrl = thumbnails
-        .sortedBy { it.height }
-        .firstOrNull { it.height >= 180 }?.url
-        ?: thumbnails.lastOrNull()?.url,
+    thumbnailUrl = thumbnails.pick(THUMBNAIL_HEIGHT),
     uploadedAtMs = runCatching { uploadDate?.instant?.toEpochMilli() }.getOrNull() ?: 0L,
     uploadedText = textualUploadDate,
 )
@@ -76,14 +73,23 @@ fun StreamInfo.toVideoItem(): VideoItem = VideoItem(
     title = name,
     uploader = uploaderName.orEmpty(),
     durationSeconds = duration,
-    thumbnailUrl = thumbnails
-        .sortedBy { it.height }
-        .firstOrNull { it.height >= 180 }?.url
-        ?: thumbnails.lastOrNull()?.url,
+    thumbnailUrl = thumbnails.pick(THUMBNAIL_HEIGHT),
     uploadedAtMs = runCatching { uploadDate?.instant?.toEpochMilli() }.getOrNull() ?: 0L,
     uploadedText = textualUploadDate,
     channelUrl = normalizeChannelUrl(uploaderUrl.orEmpty()),
 )
+
+/**
+ * Thumbnails are about 270 px tall: sharp in phone lists and on tablet cards (up to
+ * ~450 px wide) without fetching the largest images.
+ */
+private const val THUMBNAIL_HEIGHT = 270
+
+/** The smallest image at least [minHeight] tall, or the largest there is. */
+fun List<Image>.pick(minHeight: Int): String? {
+    val bySize = sortedBy { it.height }
+    return (bySize.firstOrNull { it.height >= minHeight } ?: bySize.lastOrNull())?.url
+}
 
 fun formatDuration(totalSeconds: Long): String {
     if (totalSeconds <= 0) return ""

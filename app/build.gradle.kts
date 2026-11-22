@@ -34,9 +34,12 @@ android {
 
     buildTypes {
         release {
-            // Keep minify off: NewPipeExtractor uses Rhino + reflection and needs
-            // extra ProGuard rules if you turn this on (see its README).
-            isMinifyEnabled = false
+            // R8 removes the unused parts of the libraries (most of Compose, Material and
+            // Media3), which makes the APK a fraction of the size and Compose noticeably
+            // faster. proguard-rules.pro keeps NewPipeExtractor and Rhino whole.
+            isMinifyEnabled = true
+            isShrinkResources = true
+            proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
             signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
@@ -87,6 +90,8 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    // collectAsStateWithLifecycle: screens in the background stop collecting (and recomputing)
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("io.coil-kt:coil-compose:2.7.0")
 }
 

@@ -54,13 +54,18 @@
 - **Sponsor skipping:** segment times come from [SponsorBlock](https://sponsor.ajay.app).
   The lookup uses the privacy-preserving hash-prefix endpoint, so SponsorBlock never learns
   exactly which video you're watching. Choose which categories to skip in Settings, and tap a
-  segment in the list to watch it instead.
+  segment in the list to watch it instead. Counting your skips in SponsorBlock's public stats
+  is opt-in (Settings), because that report does name the video.
 - **The player:** title, channel with a Subscribe button, and the description (views, date,
-  tap for the full text with clickable links). On phones the video goes fullscreen when you
-  turn sideways. On tablets the video and its details sit next to Up next, and fullscreen is
-  a button on the player, like YouTube. A video never plays the next one on its own.
+  tap for the full text). Timestamps in the description jump to that point, links to other
+  videos open in Antenna, and other links in your browser. On phones the video goes
+  fullscreen when you turn sideways. On tablets the video and its details sit next to
+  Up next, and fullscreen is a button on the player, like YouTube. A video never plays the
+  next one on its own, and it pauses for calls and when you unplug your headphones.
 - **Resume where you left off**, and a max-quality setting.
-- Share a YouTube link to Antenna, or open youtube.com / youtu.be links with it, to play it.
+- Share a YouTube link to Antenna, or open youtube.com / youtu.be video links with it, to play it.
+- **Nothing leaves the phone:** history and subscriptions aren't included in Google Drive
+  backups (moving to a new phone with Android's device-to-device transfer still brings them).
 
 ### Finding videos
 
@@ -141,18 +146,37 @@ YouTube changes its internals often, and third-party clients break when it does.
 
 ## Releases
 
-GitHub Actions (`.github/workflows/ci.yaml`) lints and tests every pull request and
-attaches a debug APK to the run. Every merge to `main` makes a release: a tag `vX.Y.Z`
-and a GitHub Release with the signed APK, its SHA-256, and release notes that group the
-commits by area (`.github/labeler.yaml`) above GitHub's generated list of pull requests.
+Like [wirepulse](https://github.com/amreshh/wirepulse), a pull request builds and checks
+everything, and merging it releases exactly what it built and tested
+(`.github/workflows/ci.yaml`):
 
-- **Version:** each release bumps the patch. Put `#minor` or `#major` in a commit
-  message (e.g. the merge commit) to bump that instead. The first release is the
-  `versionName` in `app/build.gradle.kts`. Changes to only Markdown files and `docs/` don't release.
+- **Pull requests** run the unit tests, Android lint and the workflow checks (actionlint,
+  zizmor) side by side, and build the release APK: shrunk with R8, with the version merging
+  would release. That APK is then started on an Android emulator (the smoke test,
+  `.github/scripts/smoke-test.sh`): it has to install, start, show the home screen and load
+  a video in the player without crashing. One comment on the pull request sums it all up and
+  is updated on every run: each check's result, the test, lint, zizmor and smoke test
+  tables, the version merging releases, and a link to download the APK.
+- **Merging into `main`** releases that APK: no checks run again and nothing is rebuilt. It
+  gets signed with the release key (the only thing that changes), tagged `vX.Y.Z`, and
+  published as a GitHub Release with its SHA-256 and release notes that group the commits by
+  area (`.github/labeler.yaml`) above GitHub's generated list of pull requests. `main` only
+  builds (and smoke-tests) an APK itself when there's no tested one to take: a pull request
+  from a fork, one that wasn't up to date with `main`, or one whose run failed or whose APK
+  expired (after 90 days).
+- **Version:** each release bumps the patch. Put `#minor` or `#major` in the pull request's
+  title or in a commit message to bump that instead; the pull request comment shows which
+  version merging releases. The first release is the `versionName` in
+  `app/build.gradle.kts`. Changes to only Markdown files and `docs/` release nothing.
 - **Updates install over each other:** the APK's versionCode is derived from the version,
   and every release is signed with the same key.
 - **Security:** CodeQL scans the Kotlin code and the workflows (`codeql.yaml`), and
   Dependabot proposes dependency and action updates weekly (`.github/dependabot.yaml`).
+  The signing key is only used by a job that builds nothing (it signs the tested APK with
+  `apksigner`), and only runs on `main` and tags.
+- **Small and fast:** release builds are shrunk with R8 (about 3 MB instead of 15 MB, and
+  Compose runs faster). `app/proguard-rules.pro` keeps NewPipeExtractor and its JavaScript
+  engine whole; if the smoke test fails where a debug build works, look there first.
 
 ### One-time setup
 
@@ -167,15 +191,24 @@ commits by area (`.github/labeler.yaml`) above GitHub's generated list of pull r
 
    `keytool` comes with any JDK, including Android Studio's (`<Android Studio>/jbr/bin`).
    `*.keystore` is in `.gitignore`. Never commit it.
-2. **Add the secrets** under Settings → Secrets and variables → Actions:
-   `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (`antenna`)
-   and `ANDROID_KEY_PASSWORD` (the same as the keystore's password unless you chose another).
+2. **Add the secrets** to a `release` environment, so only release builds can read them:
+   Settings → Environments → **New environment** `release`. Under *Deployment branches and
+   tags*, choose *Selected branches and tags* and add the branch `main` and the tag pattern
+   `v*`. Then add the environment secrets `ANDROID_KEYSTORE_BASE64`,
+   `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (`antenna`) and `ANDROID_KEY_PASSWORD`
+   (the same as the keystore's password unless you chose another). Repository secrets with
+   these names work too, but any workflow run on any branch can read those.
 3. **Settings → Actions → General → Workflow permissions:** keep "Read repository
    contents" (each job asks for what it needs).
 4. **Settings → Advanced Security:** turn on Dependabot alerts and security updates, and
    leave CodeQL's *default* setup off (the workflow is the advanced setup).
-5. Optional: a branch rule on `main` that requires the `build` and CodeQL checks, so
-   nothing unchecked gets released.
+5. **A branch rule on `main`** (Settings → Rules → Rulesets, or Branches): require a pull
+   request, require the status checks `checks` and `Analyze (java-kotlin)` (CodeQL), and
+   require branches to be up to date before merging. Then nothing unchecked can be merged,
+   and every merge releases exactly the APK its pull request tested.
+6. **After merging `dev` into `main`** with a squash merge, reset `dev` to `main`
+   (`git switch dev && git reset --hard origin/main && git push --force-with-lease`), so the
+   next pull request only shows new changes.
 
 ## Project layout
 

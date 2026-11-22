@@ -1,6 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <style name="Theme.Antenna" parent="android:Theme.Material.NoActionBar">
-        <item name="android:windowBackground">@android:color/black</item>
+    <!-- The window behind the first frame (and the launch screen on Android 12+): light
+         here, dark in values-night, so opening the app doesn't flash black in light mode. -->
+    <style name="Theme.Antenna" parent="android:Theme.Material.Light.NoActionBar">
+        <item name="android:windowBackground">@android:color/white</item>
     </style>
 </resources>

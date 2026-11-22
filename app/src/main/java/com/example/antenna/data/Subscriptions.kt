@@ -1,6 +1,7 @@
 package com.example.antenna.data
 
 import android.content.Context
+import androidx.core.content.edit
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -31,18 +32,22 @@ class SubscriptionStore private constructor(context: Context) {
         return _channels.value.any { it.url == key }
     }
 
+    // Changes are read-modify-write of the whole list, so one at a time.
+    @Synchronized
     fun subscribe(channel: Channel) {
         val url = normalizeChannelUrl(channel.url) ?: return
         if (isSubscribed(url)) return
         save(_channels.value + channel.copy(url = url))
     }
 
+    @Synchronized
     fun unsubscribe(url: String) {
         val key = normalizeChannelUrl(url) ?: url
         save(_channels.value.filterNot { it.url == key })
     }
 
     /** Adds channels that aren't already subscribed. Returns how many were new. */
+    @Synchronized
     fun addAll(channels: List<Channel>): Int {
         val existing = _channels.value.map { it.url }.toMutableSet()
         val fresh = channels.mapNotNull { c ->
@@ -64,7 +69,7 @@ class SubscriptionStore private constructor(context: Context) {
                     .put("avatar", it.avatarUrl ?: JSONObject.NULL),
             )
         }
-        sp.edit().putString(KEY, json.toString()).apply()
+        sp.edit { putString(KEY, json.toString()) }
         _channels.value = sorted
     }
 
@@ -96,6 +101,9 @@ class SubscriptionStore private constructor(context: Context) {
     }
 }
 
+/** A YouTube channel id: "UC" and 22 more characters. */
+private val CHANNEL_ID = Regex("""UC[\w-]{22}""")
+
 /**
  * Turns any youtube.com/channel/UC… link into one canonical form so duplicates match.
  * Returns null for links without a UC… channel id (e.g. bare @handles), since the
@@ -105,7 +113,7 @@ fun normalizeChannelUrl(url: String): String? {
     // Newer NewPipeExtractor versions return "channel/UC…" here rather than the bare id.
     val id = runCatching { YoutubeChannelLinkHandlerFactory.getInstance().getId(url) }.getOrNull()
         ?.removePrefix("channel/")
-        ?.takeIf { it.startsWith("UC") }
+        ?.takeIf { CHANNEL_ID.matches(it) }
         ?: Regex("""/channel/(UC[\w-]{22})""").find(url)?.groupValues?.get(1)
     return id?.let { "https://www.youtube.com/channel/$it" }
 }
@@ -126,7 +134,7 @@ fun parseTakeoutCsv(csv: String): List<Channel> =
             if (first < 0 || second < 0) return@mapNotNull null
             val id = line.substring(0, first).trim()
             val title = line.substring(second + 1).trim().removeSurrounding("\"").replace("\"\"", "\"")
-            if (!id.startsWith("UC")) null
+            if (!CHANNEL_ID.matches(id)) null
             else Channel("https://www.youtube.com/channel/$id", title.ifEmpty { id })
         }
         .toList()

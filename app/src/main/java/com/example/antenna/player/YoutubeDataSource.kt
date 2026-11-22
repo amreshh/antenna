@@ -69,6 +69,14 @@ class YoutubeDataSource(private val client: OkHttpClient) : BaseDataSource(/* is
             else -> -1L
         }
         if (endInclusive >= 0 && position > endInclusive) {
+            // Opening right at the end of the file is how ExoPlayer can probe for it:
+            // answer "nothing left", like Media3's own HTTP source does.
+            if (position == endInclusive + 1 && dataSpec.length == C.LENGTH_UNSET.toLong()) {
+                bytesRemaining = 0
+                opened = true
+                transferStarted(dataSpec)
+                return 0
+            }
             throw DataSourceException(PlaybackException.ERROR_CODE_IO_READ_POSITION_OUT_OF_RANGE)
         }
 

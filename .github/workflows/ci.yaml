@@ -1,35 +1,56 @@
 name: ci
 
-# What runs when:
+# Like amreshh/wirepulse: a pull request builds and checks everything, and
+# merging it releases exactly what it built and tested.
 #
-#   pull request   lint and unit tests, then a debug APK to try out (an
-#                  artifact on the run, kept 7 days)
-#   push to dev    the same
-#   push to main   lint and tests, then the release: the next version (see
-#                  below) built as a signed APK, a git tag v1.2.3 and a GitHub
-#                  Release with the APK, its SHA-256 and generated notes
-#   tag v1.2.3     the same release for that tag (manual; the tag must be on
-#                  main). A tag like v1.2.3-rc1 is marked as a pre-release.
+#   pull request   unit tests, Android lint and the workflow checks (actionlint,
+#                  zizmor) side by side, and the release APK: built with R8 and
+#                  the version merging would release, then started on an
+#                  emulator (smoke test). A comment on the pull request sums it
+#                  up: each check, the test, lint, zizmor and smoke test tables,
+#                  and a link to download the APK.
+#   push to main   the release, with no checks and no build: the APK the merged
+#                  pull request built and tested, signed with the release key, a
+#                  git tag v1.2.3 and a GitHub Release with generated notes. The
+#                  APK is built here (and smoke-tested) only when there's no
+#                  tested one: the pull request came from a fork, wasn't up to
+#                  date with main, or its run failed or its APK expired (after
+#                  90 days).
+#   push to dev    unit tests and the APK, to try out
+#   tag v1.2.3     every check, then that version built and released (manual;
+#                  the tag must be on main). A tag like v1.2.3-rc1 is a
+#                  pre-release.
 #
-#   Changes to nothing but the docs (Markdown files and docs/) don't release.
+#   plan ─┬─ test ─────────┐
+#         ├─ lint ─────────┤
+#         ├─ workflows ────┼─ checks ─┬─ report (pull requests)
+#         └─ build ─ smoke ┘          └─ sign ─ release (main, tags)
 #
-#   plan ─── build ─┬─ release (main, tags)
-#                   └─ debug APK (pull requests, dev)
+# Version: merging into main bumps the patch of the latest vX.Y.Z tag; "#minor"
+# or "#major" in the pull request's title or in a commit message bumps that
+# instead. The pull request works it out and builds it into the APK, and its
+# comment says which version merging releases. (With no tags yet, the first
+# release is versionName in app/build.gradle.kts.) Changes to nothing but the
+# docs (Markdown files and docs/) release nothing.
 #
-# Version on main: bumps the patch of the latest vX.Y.Z tag. Put "#minor" or
-# "#major" in a commit message (e.g. the merge commit) to bump that instead.
-# With no tags yet, the first release uses versionName in app/build.gradle.kts.
-# The APK's versionCode comes from the version (1.2.3 → 1002003), so every
-# release installs as an update over the one before.
+# Which APK main releases: every file but the docs is fingerprinted, and a pull
+# request keeps its APK as the apk-<fingerprint> artifact. main takes it from
+# the merged pull request's last successful run when the fingerprint matches
+# main's, so main releases exactly the code that was tested. Requiring pull
+# requests to be up to date before merging (a branch rule) makes that always so.
 #
-# Signing: every release must be signed with the same key, or Android won't
-# install it as an update. The key comes from these repository secrets (see
-# "Releases" in the README for how to make them):
+# Signing: Gradle signs the APK with a throwaway debug key, and the sign job,
+# which builds nothing, signs it again with the release key. The key comes from
+# these secrets, best kept in the "release" environment and limited to main and
+# v* tags (see "Releases" in the README):
 #   ANDROID_KEYSTORE_BASE64     the keystore file, base64-encoded
 #   ANDROID_KEYSTORE_PASSWORD
 #   ANDROID_KEY_ALIAS
 #   ANDROID_KEY_PASSWORD
 # A release without them fails rather than ship an APK signed with a throwaway key.
+#
+# Caches: only runs on main save the Gradle cache (CodeQL's do); pull requests
+# and dev pushes only restore it, so nothing a pull request does reaches it.
 on:
   push:
     branches: [dev, main]
@@ -48,81 +69,324 @@ concurrency:
 permissions: {}
 
 env:
-  # The docs, as git pathspecs separated by spaces. Changes to nothing but
-  # these don't make a release.
+  # The docs, as git pathspecs separated by spaces: everything else is the code
+  # the fingerprint covers.
   DOCS: ":(exclude)*.md :(exclude)docs/"
 
 jobs:
-  # Decides whether this run releases, and which version.
+  # Fingerprints the code, works out the version, and on main finds the APK the
+  # merged pull request tested.
   plan:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+      actions: read # main: the merged pull request's run and its APK
+      pull-requests: read # main: which pull request was merged
     outputs:
-      version: ${{ steps.next.outputs.version }}
-      previous: ${{ steps.next.outputs.previous }}
+      code: ${{ steps.code.outputs.code }}
+      version: ${{ steps.tested.outputs.version || steps.version.outputs.version }}
+      previous: ${{ steps.version.outputs.previous }}
+      release: ${{ steps.version.outputs.release }}
+      build: ${{ steps.tested.outputs.build }}
+      tested-run: ${{ steps.tested.outputs.run }}
     steps:
+      # Pull requests: GitHub's test merge of the pull request into its base,
+      # which is what main will have once it's merged.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # the release tags
+          fetch-depth: 0 # the release tags, and the pull request's commits
           persist-credentials: false
 
+      - name: Fingerprint the code
+        id: code
+        run: |
+          read -ra docs <<< "$DOCS"
+          code=$(git ls-files -s -- . "${docs[@]}" | sha256sum | cut -c1-20)
+          echo "Code fingerprint: $code"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
       - name: Work out the version
-        id: next
-        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        id: version
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           stable='^v[0-9]+\.[0-9]+\.[0-9]+$'
-
-          # A pushed tag: release exactly that version. The notes start at the
-          # stable release before it.
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            version=${GITHUB_REF_NAME#v}
-            last=$(git tag -l 'v*' --sort=-v:refname | grep -E "$stable" | grep -vxF "$GITHUB_REF_NAME" |
-              while read -r t; do git merge-base --is-ancestor "$t" HEAD && echo "$t"; done | head -1 || true)
-            echo "Releasing $GITHUB_REF_NAME (previous: ${last:-none})"
-            echo "version=$version" >> "$GITHUB_OUTPUT"
-            echo "previous=$last" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if git tag --points-at HEAD | grep -qE "$stable"; then
-            echo "HEAD is already released, nothing to do"
-            exit 0
-          fi
-
           last=$(git tag -l 'v*' --sort=-v:refname | grep -E "$stable" | head -1 || true)
-          read -ra docs <<< "$DOCS"
-          if [ -n "$last" ] && git diff --quiet "$last" HEAD -- . "${docs[@]}"; then
-            echo "Only the docs changed since $last, nothing to release"
+
+          # The version after the last release, bumped as the text says (#minor, #major).
+          next() { # <text>
+            if [ -z "$last" ]; then
+              grep -oP '"antennaVersion"\) as String\?\) \?: "\K[0-9]+\.[0-9]+\.[0-9]+' app/build.gradle.kts
+              return
+            fi
+            local major minor patch
+            IFS=. read -r major minor patch <<< "${last#v}"
+            if grep -q '#major' <<< "$1"; then
+              echo "$((major + 1)).0.0"
+            elif grep -q '#minor' <<< "$1"; then
+              echo "$major.$((minor + 1)).0"
+            else
+              echo "$major.$minor.$((patch + 1))"
+            fi
+          }
+
+          release=false
+          case "$GITHUB_EVENT_NAME:$GITHUB_REF" in
+            pull_request:*)
+              # Its title and commits (HEAD is the test merge: its base, then its head).
+              version=$(next "$(printf '%s\n' "$PR_TITLE"; git log --format=%B HEAD^1..HEAD^2)")
+              ;;
+            push:refs/tags/v*)
+              version=${GITHUB_REF_NAME#v}
+              # The notes start at the stable release before this one.
+              last=$(git tag -l 'v*' --sort=-v:refname | grep -E "$stable" | grep -vxF "$GITHUB_REF_NAME" |
+                while read -r t; do git merge-base --is-ancestor "$t" HEAD && echo "$t"; done | head -1 || true)
+              release=true
+              ;;
+            push:refs/heads/main)
+              read -ra docs <<< "$DOCS"
+              if git tag --points-at HEAD | grep -E "$stable" > /dev/null; then
+                echo "HEAD is already released, nothing to do"
+              elif [ -n "$last" ] && git diff --quiet "$last" HEAD -- . "${docs[@]}"; then
+                echo "Only the docs changed since $last, nothing to release"
+              else
+                release=true
+              fi
+              version=$(next "$(git log --format=%B "${last:+$last..}HEAD")")
+              ;;
+            *)
+              # dev pushes and manual runs: an APK to try out
+              version=$(next "")
+              ;;
+          esac
+
+          echo "Version: $version (previous release: ${last:-none}, releasing: $release)"
+          {
+            echo "version=$version"
+            echo "previous=$last"
+            echo "release=$release"
+          } >> "$GITHUB_OUTPUT"
+
+      # main: no build when the merged pull request's run built and tested this
+      # exact code. Otherwise (and on every other event) the build job builds it.
+      - name: Find the APK the pull request tested
+        id: tested
+        env:
+          GH_TOKEN: ${{ github.token }}
+          CODE: ${{ steps.code.outputs.code }}
+          RELEASE: ${{ steps.version.outputs.release }}
+          LAST: ${{ steps.version.outputs.previous }}
+        run: |
+          build() { # <why>
+            echo "$1"
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          }
+          if [ "$GITHUB_EVENT_NAME" != push ] || [ "$GITHUB_REF" != refs/heads/main ]; then
+            build "This run builds its own APK"
+          fi
+          if [ "$RELEASE" != true ]; then
+            echo "Nothing to release"
             exit 0
           fi
-          if [ -z "$last" ]; then
-            version=$(grep -oP '"antennaVersion"\) as String\?\) \?: "\K[0-9]+\.[0-9]+\.[0-9]+' app/build.gradle.kts)
-          else
-            IFS=. read -r major minor patch <<< "${last#v}"
-            log=$(git log "$last..HEAD" --format=%B)
-            if grep -q '#major' <<< "$log"; then
-              version="$((major + 1)).0.0"
-            elif grep -q '#minor' <<< "$log"; then
-              version="$major.$((minor + 1)).0"
-            else
-              version="$major.$minor.$((patch + 1))"
+
+          # The pull request merged into this commit (by squash, merge or rebase),
+          # if it came from this repository rather than a fork...
+          pr=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" |
+            jq -r --arg repo "$GITHUB_REPOSITORY" 'first(.[] | select(.merged_at != null and .base.ref == "main"
+              and .head.repo.full_name == $repo)) | "\(.number) \(.head.sha)"')
+          if [ -z "$pr" ]; then
+            build "No pull request from this repository was merged into ${GITHUB_SHA:0:7}: building the APK"
+          fi
+          read -r number head <<< "$pr"
+
+          # ...its last successful run, for its last commit...
+          run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yaml/runs?event=pull_request&status=success&head_sha=$head&per_page=1" \
+            --jq '.workflow_runs[0].id // empty')
+          if [ -z "$run" ]; then
+            build "Pull request #$number has no successful run for its last commit: building the APK"
+          fi
+
+          # ...and that run's APK, if it's of this code.
+          if ! gh run download "$run" --repo "$GITHUB_REPOSITORY" --name "apk-$CODE" --dir "$RUNNER_TEMP/tested"; then
+            build "Pull request #$number's run $run has no APK of this code (it wasn't up to date with main, or its APK expired): building the APK"
+          fi
+          apk=$(find "$RUNNER_TEMP/tested" -name '*.apk' -print -quit)
+          aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -1)
+          tested=$("$aapt2" dump badging "$apk" | sed -n "s/^package: .*versionName='\([^']*\)'.*/\1/p")
+
+          # Its version has to be one this release can have: not released yet, and newer.
+          newer=true
+          if [ -n "$LAST" ]; then
+            if [ "$tested" = "${LAST#v}" ] || [ "$(printf '%s\n%s\n' "${LAST#v}" "$tested" | sort -V | tail -1)" != "$tested" ]; then
+              newer=false
             fi
           fi
+          if ! [[ "$tested" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || git rev-parse -q --verify "refs/tags/v$tested" > /dev/null ||
+            [ "$newer" != true ]; then
+            build "Pull request #$number's APK is version ${tested:-?}, which can't follow ${LAST:-nothing}: building the APK"
+          fi
 
-          echo "Releasing v$version (previous: ${last:-none})"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "previous=$last" >> "$GITHUB_OUTPUT"
+          echo "Releasing the APK pull request #$number tested in run $run: version $tested"
+          {
+            echo "build=false"
+            echo "run=$run"
+            echo "version=$tested"
+          } >> "$GITHUB_OUTPUT"
 
-  # Lint and unit tests on every run, then the APK: a debug one to try out, or
-  # the signed release.
-  build:
+  # Everything but pushes to main (whose pull request ran the tests).
+  test:
     needs: plan
-    # Not on main when there's nothing to release (e.g. only the docs changed).
-    if: github.ref != 'refs/heads/main' || needs.plan.outputs.version != ''
+    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
     runs-on: ubuntu-24.04
     permissions:
       contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The JDK that runs Gradle: the version gradle/gradle-daemon-jvm.properties
+      # asks for, so Gradle doesn't download one of its own. (The app itself
+      # targets Java 17.)
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # Gradle's downloads, restored from main's cache, and a check that
+      # gradle/wrapper/gradle-wrapper.jar is a genuine Gradle release. zizmor's
+      # cache-poisoning warning doesn't apply: only runs on main save this cache,
+      # so nothing from a pull request reaches anything that's released.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
+
+      - name: Unit tests
+        run: ./gradlew testDebugUnitTest
+
+      - name: Test results
+        if: ${{ !cancelled() }}
+        run: |
+          python3 -I .github/scripts/test-summary.py app/build/test-results > "$RUNNER_TEMP/tests-summary.md"
+          cat "$RUNNER_TEMP/tests-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-summary-tests
+          path: ${{ runner.temp }}/tests-summary.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # Android lint: pull requests, tags and manual runs. Its findings are a table
+  # in the run summary and the pull request comment; errors fail it.
+  lint:
+    needs: plan
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # Restores main's cache only; see the test job.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
+
+      - name: Android lint
+        run: ./gradlew lintDebug
+
+      - name: Lint table
+        if: ${{ !cancelled() }}
+        uses: $/.github/actions/sarif-summary
+        with:
+          sarif: app/build/reports/lint-results-debug.sarif
+          name: lint
+          title: Android lint
+
+      - name: Lint report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+          retention-days: 7
+
+  # The workflow files: pull requests, tags and manual runs.
+  #   actionlint  syntax, expressions, and ShellCheck on the run: scripts
+  #   zizmor      security problems (injection, credentials, cache poisoning…):
+  #               fails on any finding, which are also a table in the run
+  #               summary and the pull request comment, and in code scanning
+  workflows:
+    needs: plan
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # zizmor's report, in code scanning
+    env:
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      # Pull requests: the head commit, so code scanning files zizmor's report
+      # under it. (Empty on other events: the default.)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: actionlint
+        run: |
+          file="actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          curl -fsSLO "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/${file}"
+          echo "${ACTIONLINT_SHA256}  ${file}" | sha256sum -c -
+          tar -xzf "$file" actionlint
+          ./actionlint -color
+
+      # SARIF, for the table, also uploaded to code scanning. zizmor never fails
+      # in this mode, so the last step does the checking. (Pull requests from
+      # forks get a read-only token: no upload, no table.)
+      - name: zizmor report
+        id: report
+        if: ${{ !cancelled() && !github.event.pull_request.head.repo.fork }}
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: 1.32.0
+
+      - name: zizmor table
+        if: ${{ !cancelled() && steps.report.outputs.output-file != '' }}
+        uses: $/.github/actions/sarif-summary
+        with:
+          sarif: ${{ steps.report.outputs.output-file }}
+          name: zizmor
+          title: Workflow security (zizmor)
+
+      # Fails on findings and marks them on the workflow lines.
+      - name: zizmor
+        if: ${{ !cancelled() }}
+        uses: zizmorcore/zizmor-action@45d7276c9ca790aabd705e31ca99c6185c3e76dd # v0.8.1
+        with:
+          version: 1.32.0
+          advanced-security: false
+          annotations: true
+
+  # The release APK, with R8 and the version from plan. Not on main when the
+  # merged pull request's APK is released (then nothing is built).
+  build:
+    needs: plan
+    if: needs.plan.outputs.build == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      apk-url: ${{ steps.keep.outputs.artifact-url }}
     env:
       VERSION: ${{ needs.plan.outputs.version }}
     steps:
@@ -139,81 +403,279 @@ jobs:
             exit 1
           fi
 
-      # The JDK that runs Gradle (the app itself targets Java 17).
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25
 
-      # Caches Gradle's downloads and build outputs between runs (only main
-      # writes the cache; other branches read it), and checks that
-      # gradle/wrapper/gradle-wrapper.jar is a genuine Gradle release.
-      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+      # Restores main's cache only; see the test job.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
 
-      # The Android SDK comes with the runner; Gradle fetches any platform it misses.
-      - name: Lint and unit tests
-        run: ./gradlew lintDebug testDebugUnitTest
+      # Signed with Gradle's throwaway debug key: installable to try out, and
+      # signed with the release key when it's released (the sign job).
+      - name: Release APK
+        run: |
+          ./gradlew assembleRelease -PantennaVersion="$VERSION"
+          mkdir -p dist
+          cp app/build/outputs/apk/release/app-release.apk "dist/antenna-v$VERSION.apk"
 
-      - name: Lint report
-        if: failure()
+      - name: APK summary
+        run: |
+          apk="dist/antenna-v$VERSION.apk"
+          aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -1)
+          badging=$("$aapt2" dump badging "$apk")
+          code=$(sed -n "s/^package: .*versionCode='\([0-9]*\)'.*/\1/p" <<< "$badging")
+          min=$(sed -n "s/^minSdkVersion:'\([0-9]*\)'$/\1/p" <<< "$badging")
+          target=$(sed -n "s/^targetSdkVersion:'\([0-9]*\)'$/\1/p" <<< "$badging")
+          size=$(awk -v b="$(stat -c %s "$apk")" 'BEGIN { printf "%.1f", b / 1e6 }')
+          {
+            echo "## Release APK"
+            echo
+            echo "| | |"
+            echo "| --- | --- |"
+            echo "| Version | $VERSION (versionCode $code) |"
+            echo "| Size | $size MB, shrunk with R8 |"
+            echo "| Android | API $min and up, targets API $target |"
+            echo "| Signed with | a throwaway test key; the release key replaces it when it's released |"
+          } > "$RUNNER_TEMP/apk-summary.md"
+          cat "$RUNNER_TEMP/apk-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - if: github.event_name == 'pull_request'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: lint-report
-          path: app/build/reports/lint-results-debug.html
+          name: scan-summary-apk
+          path: ${{ runner.temp }}/apk-summary.md
+          retention-days: 7
+
+      # Named after the code it's built from, so main can find it once this is
+      # merged. Pull requests keep it 90 days (GitHub's limit): merged later,
+      # main builds its own.
+      - name: Keep the APK
+        id: keep
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: apk-${{ needs.plan.outputs.code }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: ${{ github.event_name == 'pull_request' && 90 || 7 }}
+          overwrite: true # a re-run replaces it
+
+  # The APK on an emulator (.github/scripts/smoke-test.sh): it installs and
+  # starts, the home screen shows, the player loads a video, nothing crashes.
+  # Everywhere the APK is built, except dev pushes.
+  smoke:
+    needs: [plan, build]
+    if: needs.build.result == 'success' && !(github.event_name == 'push' && github.ref == 'refs/heads/dev')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-${{ needs.plan.outputs.code }}
+          path: apk
+
+      # The runner's KVM, so the emulator runs at full speed.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Smoke test
+        uses: ReactiveCircus/android-emulator-runner@a421e43855164a8197daf9d8d40fe71c6996bb0d # v2.38.0
+        env:
+          APK: apk/antenna-v${{ needs.plan.outputs.version }}.apk
+          SUMMARY: ${{ runner.temp }}/smoke-summary.md
+          SCREENSHOTS: ${{ runner.temp }}/smoke-screenshots
+        with:
+          api-level: 35 # the app's targetSdk
+          target: google_apis
+          arch: x86_64
+          cores: 4
+          disable-spellchecker: true
+          script: bash .github/scripts/smoke-test.sh
+
+      - name: Smoke test summary
+        if: ${{ !cancelled() }}
+        run: |
+          if [ -f "$RUNNER_TEMP/smoke-summary.md" ]; then
+            cat "$RUNNER_TEMP/smoke-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-summary-smoke
+          path: ${{ runner.temp }}/smoke-summary.md
           if-no-files-found: ignore
           retention-days: 7
 
-      # Pull requests, dev and manual runs: an APK to try the change on a phone.
-      - name: Debug APK
-        if: env.VERSION == ''
-        run: ./gradlew assembleDebug
-
-      - name: Upload debug APK
-        if: env.VERSION == ''
+      - name: Screenshots
+        if: ${{ !cancelled() }}
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: antenna-debug-${{ github.event.pull_request.head.sha || github.sha }}
-          path: app/build/outputs/apk/debug/app-debug.apk
+          name: smoke-screenshots
+          path: ${{ runner.temp }}/smoke-screenshots
+          if-no-files-found: ignore
           retention-days: 7
 
-      # Releases: the signed APK. The keystore only exists on the runner for
-      # this step.
-      - name: Release APK
-        if: env.VERSION != ''
+  # The one check to require in branch rules: fails when any check failed or
+  # was cancelled. (A skipped job counts as passed, so requiring build alone
+  # would let a failed lint through.)
+  checks:
+    needs: [plan, test, lint, workflows, build, smoke]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: All checks passed
+        env:
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          echo "plan, test, lint, workflows, build, smoke: $RESULTS"
+          case " $RESULTS " in
+            *" failure "* | *" cancelled "*) exit 1 ;;
+          esac
+
+  # Pull requests: one comment with the results and the tables
+  # (.github/scripts/ci-report.sh), updated on every run. (Pull requests from
+  # forks get a read-only token: no comment.)
+  report:
+    needs: [plan, test, lint, workflows, build, smoke]
+    if: ${{ !cancelled() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read # the script
+      pull-requests: write # the comment
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The tables: tests, lint, zizmor, APK, smoke test. One is missing when its
+      # job didn't get that far.
+      - name: Get the tables
+        continue-on-error: true
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: scan-summary-*
+          path: tables
+          merge-multiple: true
+
+      - name: Comment on the pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          VERSION: ${{ needs.plan.outputs.version }}
+          TEST: ${{ needs.test.result }}
+          LINT: ${{ needs.lint.result }}
+          WORKFLOWS: ${{ needs.workflows.result }}
+          BUILD: ${{ needs.build.result }}
+          SMOKE: ${{ needs.smoke.result }}
+          APK_URL: ${{ needs.build.outputs.apk-url }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          mkdir -p tables
+          (cd tables && "$GITHUB_WORKSPACE/.github/scripts/ci-report.sh") > comment.md
+          marker=$(head -1 comment.md)
+
+          # Update the earlier comment if there is one, so the PR keeps one.
+          id=$(gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments" \
+            --jq ".[] | select(.user.login == \"github-actions[bot]\" and (.body | startswith(\"$marker\"))) | .id" | tail -n 1)
+          if [ -n "$id" ]; then
+            jq -n --rawfile body comment.md '{body: $body}' |
+              gh api -X PATCH "repos/$GITHUB_REPOSITORY/issues/comments/$id" --input - > /dev/null
+          else
+            jq -n --rawfile body comment.md '{body: $body}' |
+              gh api -X POST "repos/$GITHUB_REPOSITORY/issues/$PR/comments" --input - > /dev/null
+          fi
+
+  # main and tags: the APK signed with the release key. The only job with the
+  # key, and it builds nothing: it signs the APK the pull request (or, without
+  # one, this run's build job) built and tested. It runs in the "release"
+  # environment, so the secrets can be kept there and limited to main and v*
+  # tags (Settings → Environments; see the README). Repository secrets work too.
+  sign:
+    needs: [plan, checks]
+    if: ${{ !cancelled() && needs.plan.outputs.release == 'true' && needs.checks.result == 'success' }}
+    runs-on: ubuntu-24.04
+    environment: release
+    permissions:
+      contents: read
+      actions: read # the APK from the pull request's run
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - name: The APK the pull request tested
+        if: needs.plan.outputs.tested-run != ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-${{ needs.plan.outputs.code }}
+          path: apk
+          run-id: ${{ needs.plan.outputs.tested-run }}
+          github-token: ${{ github.token }}
+
+      - name: The APK this run built and tested
+        if: needs.plan.outputs.tested-run == ''
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: apk-${{ needs.plan.outputs.code }}
+          path: apk
+
+      - name: Check it's this app and version
+        run: |
+          aapt2=$(find "$ANDROID_HOME/build-tools" -name aapt2 | sort -V | tail -1)
+          package=$("$aapt2" dump badging "apk/antenna-v$VERSION.apk" | sed -n '/^package:/p')
+          echo "$package"
+          if ! grep -q "name='com.example.antenna' .* versionName='$VERSION'" <<< "$package"; then
+            echo "::error::The APK isn't com.example.antenna $VERSION"
+            exit 1
+          fi
+
+      # The keystore only exists on the runner for this step, and the passwords
+      # reach apksigner through the environment, not its command line.
+      - name: Sign with the release key
         env:
           KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANTENNA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANTENNA_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANTENNA_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
         run: |
-          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$ANTENNA_KEYSTORE_PASSWORD" ] ||
-            [ -z "$ANTENNA_KEY_ALIAS" ] || [ -z "$ANTENNA_KEY_PASSWORD" ]; then
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ] || [ -z "$KEY_PASSWORD" ]; then
             echo "::error::The release signing secrets aren't set (see the top of .github/workflows/ci.yaml)"
             exit 1
           fi
-          export ANTENNA_KEYSTORE="$RUNNER_TEMP/release.keystore"
-          trap 'rm -f "$ANTENNA_KEYSTORE"' EXIT
-          base64 -d <<< "$KEYSTORE_BASE64" > "$ANTENNA_KEYSTORE"
-          ./gradlew assembleRelease -PantennaVersion="$VERSION"
+          keystore="$RUNNER_TEMP/release.keystore"
+          trap 'rm -f "$keystore"' EXIT
+          base64 -d <<< "$KEYSTORE_BASE64" > "$keystore"
+          apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          mkdir -p dist
+          "$apksigner" sign --ks "$keystore" --ks-key-alias "$KEY_ALIAS" \
+            --ks-pass env:KEYSTORE_PASSWORD --key-pass env:KEY_PASSWORD \
+            --out "dist/antenna-v$VERSION.apk" "apk/antenna-v$VERSION.apk"
 
       # Fails if the APK isn't signed with the release key. Prints the
       # certificate, to compare with an installed copy.
       - name: Check the signature
-        if: env.VERSION != ''
         run: |
           apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
-          apk=app/build/outputs/apk/release/app-release.apk
+          apk="dist/antenna-v$VERSION.apk"
           "$apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
           if grep -q 'CN=Android Debug' "$RUNNER_TEMP/certs.txt"; then
             echo "::error::The release APK is signed with a debug key"
             exit 1
           fi
-          mkdir -p dist
-          cp "$apk" "dist/antenna-v$VERSION.apk"
           (cd dist && sha256sum "antenna-v$VERSION.apk" > "antenna-v$VERSION.apk.sha256")
 
       - name: Upload release APK
-        if: env.VERSION != ''
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release
@@ -221,9 +683,11 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+  # Publishes what the sign job signed: the tag, the GitHub Release and its
+  # notes. Builds nothing, so the one job with write access runs no build code.
   release:
-    needs: [plan, build]
-    if: needs.plan.outputs.version != '' && needs.build.result == 'success'
+    needs: [plan, sign]
+    if: ${{ !cancelled() && needs.sign.result == 'success' }}
     runs-on: ubuntu-24.04
     permissions:
       contents: write # the tag and the release

@@ -16,7 +16,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -60,7 +60,7 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ForYouTab(vm: ForYouViewModel, onOpenVideo: (String) -> Unit, modifier: Modifier = Modifier) {
-    val items by vm.items.collectAsState()
+    val items by vm.items.collectAsStateWithLifecycle()
 
     PullToRefreshBox(isRefreshing = false, onRefresh = vm::reshuffle, modifier = modifier) {
         if (items.isEmpty()) {
@@ -82,7 +82,7 @@ fun ForYouTab(vm: ForYouViewModel, onOpenVideo: (String) -> Unit, modifier: Modi
 fun HistoryTab(onOpenVideo: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val store = remember(context) { WatchHistoryStore.get(context) }
-    val entries by store.entries.collectAsState()
+    val entries by store.entries.collectAsStateWithLifecycle()
     val sorted = remember(entries) { entries.values.sortedByDescending { it.lastWatchedAt } }
 
     if (sorted.isEmpty()) {

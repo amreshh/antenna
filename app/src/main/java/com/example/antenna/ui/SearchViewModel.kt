@@ -12,6 +12,16 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.schabi.newpipe.extractor.Page
+import org.schabi.newpipe.extractor.exceptions.AgeRestrictedContentException
+import org.schabi.newpipe.extractor.exceptions.ContentNotAvailableException
+import org.schabi.newpipe.extractor.exceptions.GeographicRestrictionException
+import org.schabi.newpipe.extractor.exceptions.PaidContentException
+import org.schabi.newpipe.extractor.exceptions.PrivateContentException
+import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
+import org.schabi.newpipe.extractor.exceptions.SignInConfirmNotBotException
+import java.net.ConnectException
+import java.net.SocketTimeoutException
+import java.net.UnknownHostException
 
 data class SearchUiState(
     val query: String = "",
@@ -78,5 +88,18 @@ class SearchViewModel : ViewModel() {
     }
 }
 
-internal fun Throwable.readable(): String =
-    "${javaClass.simpleName}: ${message ?: "unknown error"}"
+/** An error message for people, for the errors YouTube and the network commonly cause. */
+internal fun Throwable.readable(): String = when (this) {
+    is ReCaptchaException, is SignInConfirmNotBotException ->
+        "YouTube is limiting requests from this network. Wait a while, or switch networks."
+    is AgeRestrictedContentException -> "This video is age-restricted, which needs a signed-in account."
+    is GeographicRestrictionException -> "This video isn't available in your country."
+    is PaidContentException -> "This video is only for paying members."
+    is PrivateContentException -> "This video is private."
+    // YouTube's own reason is quoted in the message: "This video is unavailable", "…removed by the uploader"
+    is ContentNotAvailableException ->
+        message?.let { Regex("\"(.+)\"").find(it)?.groupValues?.get(1) } ?: "This video isn't available."
+    is UnknownHostException, is ConnectException, is SocketTimeoutException ->
+        "Can't reach YouTube. Check your internet connection."
+    else -> "${javaClass.simpleName}: ${message ?: "unknown error"}"
+}
