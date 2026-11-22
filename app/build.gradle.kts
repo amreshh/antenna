@@ -69,10 +69,10 @@ dependencies {
     // YouTube stream/search extraction (same library NewPipe uses). Bump this
     // when YouTube breaks things: https://github.com/TeamNewPipe/NewPipeExtractor/releases
     implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
-    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.3")
+    coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     // Player
     implementation("androidx.media3:media3-exoplayer:1.5.1")
