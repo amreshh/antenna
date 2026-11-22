@@ -1,0 +1,77 @@
+name: codeql
+
+# CodeQL code scanning, as the "advanced setup": this workflow instead of
+# GitHub's default setup, which has to be off for it to upload (repository
+# settings → Advanced Security). It scans the Kotlin app and the GitHub
+# Actions workflows with the default queries, on pull requests to main,
+# pushes to main and weekly. Results go to Security → Code scanning and show
+# on the pull request.
+#
+# Kotlin is only analysed while CodeQL watches it being compiled (build-mode
+# none reads Java source only, and the app is all Kotlin), so that job runs a
+# debug build with Gradle's caches off: a task restored from the cache
+# compiles nothing for CodeQL to see. CodeQL supports Kotlin versions some
+# months after they ship: if extraction fails after a Kotlin bump, update
+# the codeql-action pins (Dependabot does) or wait for a release that knows it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    - cron: "29 2 * * 1" # Mondays, 02:29 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# No token permissions unless a job asks for them.
+permissions: {}
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      security-events: write # upload the results
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: java-kotlin
+            build-mode: manual
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: github/codeql-action/init@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - if: matrix.build-mode == 'manual'
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Downloads only: the build itself must run in full (below). Also checks
+      # that the Gradle wrapper jar is genuine.
+      - if: matrix.build-mode == 'manual'
+        uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-read-only: true
+
+      - name: Build for CodeQL
+        if: matrix.build-mode == 'manual'
+        run: ./gradlew assembleDebug --no-build-cache --no-configuration-cache --rerun-tasks
+
+      # The default setup's category, so alerts it found carry over.
+      - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        with:
+          category: /language:${{ matrix.language }}

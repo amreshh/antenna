@@ -102,9 +102,12 @@ class SubscriptionStore private constructor(context: Context) {
  * RSS feed needs the id.
  */
 fun normalizeChannelUrl(url: String): String? {
+    // Newer NewPipeExtractor versions return "channel/UC…" here rather than the bare id.
     val id = runCatching { YoutubeChannelLinkHandlerFactory.getInstance().getId(url) }.getOrNull()
+        ?.removePrefix("channel/")
+        ?.takeIf { it.startsWith("UC") }
         ?: Regex("""/channel/(UC[\w-]{22})""").find(url)?.groupValues?.get(1)
-    return if (id != null && id.startsWith("UC")) "https://www.youtube.com/channel/$id" else null
+    return id?.let { "https://www.youtube.com/channel/$it" }
 }
 
 /**
@@ -114,7 +117,7 @@ fun normalizeChannelUrl(url: String): String? {
  */
 fun parseTakeoutCsv(csv: String): List<Channel> =
     csv.lineSequence()
-        .map { it.trim().removePrefix("﻿") }
+        .map { it.trim().removePrefix("\uFEFF") }
         .filter { it.isNotEmpty() && !it.startsWith("Channel Id", ignoreCase = true) }
         .mapNotNull { line ->
             // split on the first two commas only, titles can contain commas

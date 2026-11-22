@@ -1,0 +1,45 @@
+# Areas of the app, by the files a change touches:
+# - Pull requests get a label for each area they touch (workflows/labeler.yaml).
+#   A label that doesn't exist yet is created the first time it's used; set
+#   its colour and description under Issues → Labels.
+# - Release notes list each commit under the first area it touches, in this
+#   order (scripts/release-notes.sh), so put the more specific areas first.
+
+# Playback: the player screen, stream picking and fetching.
+player:
+  - changed-files:
+      - any-glob-to-any-file:
+          - app/src/main/java/**/player/**
+          - app/src/main/java/**/ui/PlayerActivity.kt
+
+sponsorblock:
+  - changed-files:
+      - any-glob-to-any-file: app/src/main/java/**/sponsorblock/**
+
+# The launcher icon and the logo it's made from.
+design:
+  - changed-files:
+      - any-glob-to-any-file: [art/**, app/src/main/res/drawable/**, app/src/main/res/mipmap*/**]
+
+ui:
+  - changed-files:
+      - any-glob-to-any-file: [app/src/main/java/**/ui/**, app/src/main/res/**, app/src/main/AndroidManifest.xml]
+
+# Talking to YouTube (NewPipeExtractor), subscriptions, history, recommendations.
+data:
+  - changed-files:
+      - any-glob-to-any-file: [app/src/main/java/**/data/**, app/src/main/java/**/net/**, app/src/main/java/**/App.kt]
+
+# Gradle, the Android Gradle Plugin and the app's dependencies.
+build:
+  - changed-files:
+      - any-glob-to-any-file: ["**/*.gradle.kts", gradle/**, gradle.properties, gradlew, gradlew.bat]
+
+ci:
+  - changed-files:
+      - any-glob-to-any-file: .github/**
+
+# The same files ci.yaml treats as docs (no release).
+docs:
+  - changed-files:
+      - any-glob-to-any-file: ["**/*.md", docs/**]

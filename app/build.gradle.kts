@@ -12,8 +12,24 @@ android {
         applicationId = "com.example.antenna"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1.0"
+        // The first release's version. After that, CI passes the release's version
+        // (-PantennaVersion=1.2.3, from the git tag); see .github/workflows/ci.yaml.
+        versionName = (findProperty("antennaVersion") as String?) ?: "0.1.0"
+        versionCode = versionCodeOf(versionName!!)
+    }
+
+    // CI signs releases with the release key (repository secrets, see the README).
+    // Every release has to be signed with the same key, or Android refuses to
+    // install it as an update. Without the key (local builds) the debug key is used.
+    signingConfigs {
+        System.getenv("ANTENNA_KEYSTORE")?.let { keystore ->
+            create("release") {
+                storeFile = file(keystore)
+                storePassword = System.getenv("ANTENNA_KEYSTORE_PASSWORD")
+                keyAlias = System.getenv("ANTENNA_KEY_ALIAS")
+                keyPassword = System.getenv("ANTENNA_KEY_PASSWORD")
+            }
+        }
     }
 
     buildTypes {
@@ -21,8 +37,7 @@ android {
             // Keep minify off: NewPipeExtractor uses Rhino + reflection and needs
             // extra ProGuard rules if you turn this on (see its README).
             isMinifyEnabled = false
-            // Signed with the debug key so you can sideload a release build easily.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
         }
     }
 
@@ -73,4 +88,15 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
     implementation("io.coil-kt:coil-compose:2.7.0")
+}
+
+/**
+ * Android only installs an update with a higher versionCode, so it's derived from
+ * the version: 1.2.3 → 1_002_003. Room for 999 minors and patches per major.
+ */
+fun versionCodeOf(version: String): Int {
+    val (major, minor, patch) = Regex("""^(\d+)\.(\d+)\.(\d+)""").find(version)?.destructured
+        ?: error("antennaVersion must look like 1.2.3, got \"$version\"")
+    require(minor.toInt() < 1000 && patch.toInt() < 1000) { "minor and patch must be below 1000: $version" }
+    return major.toInt() * 1_000_000 + minor.toInt() * 1_000 + patch.toInt()
 }
