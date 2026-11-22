@@ -1,0 +1,274 @@
+name: ci
+
+# What runs when:
+#
+#   pull request   lint and unit tests, then a debug APK to try out (an
+#                  artifact on the run, kept 7 days)
+#   push to dev    the same
+#   push to main   lint and tests, then the release: the next version (see
+#                  below) built as a signed APK, a git tag v1.2.3 and a GitHub
+#                  Release with the APK, its SHA-256 and generated notes
+#   tag v1.2.3     the same release for that tag (manual; the tag must be on
+#                  main). A tag like v1.2.3-rc1 is marked as a pre-release.
+#
+#   Changes to nothing but the docs (Markdown files and docs/) don't release.
+#
+#   plan ─── build ─┬─ release (main, tags)
+#                   └─ debug APK (pull requests, dev)
+#
+# Version on main: bumps the patch of the latest vX.Y.Z tag. Put "#minor" or
+# "#major" in a commit message (e.g. the merge commit) to bump that instead.
+# With no tags yet, the first release uses versionName in app/build.gradle.kts.
+# The APK's versionCode comes from the version (1.2.3 → 1002003), so every
+# release installs as an update over the one before.
+#
+# Signing: every release must be signed with the same key, or Android won't
+# install it as an update. The key comes from these repository secrets (see
+# "Releases" in the README for how to make them):
+#   ANDROID_KEYSTORE_BASE64     the keystore file, base64-encoded
+#   ANDROID_KEYSTORE_PASSWORD
+#   ANDROID_KEY_ALIAS
+#   ANDROID_KEY_PASSWORD
+# A release without them fails rather than ship an APK signed with a throwaway key.
+on:
+  push:
+    branches: [dev, main]
+    # Version-shaped tags only, so a stray tag like "vtest" never triggers a release.
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  # Never cancel a release halfway (tag created but no APK attached yet).
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
+# No token permissions unless a job asks for them.
+permissions: {}
+
+env:
+  # The docs, as git pathspecs separated by spaces. Changes to nothing but
+  # these don't make a release.
+  DOCS: ":(exclude)*.md :(exclude)docs/"
+
+jobs:
+  # Decides whether this run releases, and which version.
+  plan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.next.outputs.version }}
+      previous: ${{ steps.next.outputs.previous }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the release tags
+          persist-credentials: false
+
+      - name: Work out the version
+        id: next
+        if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/v')
+        run: |
+          stable='^v[0-9]+\.[0-9]+\.[0-9]+$'
+
+          # A pushed tag: release exactly that version. The notes start at the
+          # stable release before it.
+          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
+            version=${GITHUB_REF_NAME#v}
+            last=$(git tag -l 'v*' --sort=-v:refname | grep -E "$stable" | grep -vxF "$GITHUB_REF_NAME" |
+              while read -r t; do git merge-base --is-ancestor "$t" HEAD && echo "$t"; done | head -1 || true)
+            echo "Releasing $GITHUB_REF_NAME (previous: ${last:-none})"
+            echo "version=$version" >> "$GITHUB_OUTPUT"
+            echo "previous=$last" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git tag --points-at HEAD | grep -qE "$stable"; then
+            echo "HEAD is already released, nothing to do"
+            exit 0
+          fi
+
+          last=$(git tag -l 'v*' --sort=-v:refname | grep -E "$stable" | head -1 || true)
+          read -ra docs <<< "$DOCS"
+          if [ -n "$last" ] && git diff --quiet "$last" HEAD -- . "${docs[@]}"; then
+            echo "Only the docs changed since $last, nothing to release"
+            exit 0
+          fi
+          if [ -z "$last" ]; then
+            version=$(grep -oP '"antennaVersion"\) as String\?\) \?: "\K[0-9]+\.[0-9]+\.[0-9]+' app/build.gradle.kts)
+          else
+            IFS=. read -r major minor patch <<< "${last#v}"
+            log=$(git log "$last..HEAD" --format=%B)
+            if grep -q '#major' <<< "$log"; then
+              version="$((major + 1)).0.0"
+            elif grep -q '#minor' <<< "$log"; then
+              version="$major.$((minor + 1)).0"
+            else
+              version="$major.$minor.$((patch + 1))"
+            fi
+          fi
+
+          echo "Releasing v$version (previous: ${last:-none})"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "previous=$last" >> "$GITHUB_OUTPUT"
+
+  # Lint and unit tests on every run, then the APK: a debug one to try out, or
+  # the signed release.
+  build:
+    needs: plan
+    # Not on main when there's nothing to release (e.g. only the docs changed).
+    if: github.ref != 'refs/heads/main' || needs.plan.outputs.version != ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.plan.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # for the tag check below
+          persist-credentials: false
+
+      - name: Check release tag is on main
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::Tag ${GITHUB_REF_NAME} points at a commit that is not on main"
+            exit 1
+          fi
+
+      # The JDK that runs Gradle (the app itself targets Java 17).
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 21
+
+      # Caches Gradle's downloads and build outputs between runs (only main
+      # writes the cache; other branches read it), and checks that
+      # gradle/wrapper/gradle-wrapper.jar is a genuine Gradle release.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+
+      # The Android SDK comes with the runner; Gradle fetches any platform it misses.
+      - name: Lint and unit tests
+        run: ./gradlew lintDebug testDebugUnitTest
+
+      - name: Lint report
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: lint-report
+          path: app/build/reports/lint-results-debug.html
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # Pull requests, dev and manual runs: an APK to try the change on a phone.
+      - name: Debug APK
+        if: env.VERSION == ''
+        run: ./gradlew assembleDebug
+
+      - name: Upload debug APK
+        if: env.VERSION == ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: antenna-debug-${{ github.event.pull_request.head.sha || github.sha }}
+          path: app/build/outputs/apk/debug/app-debug.apk
+          retention-days: 7
+
+      # Releases: the signed APK. The keystore only exists on the runner for
+      # this step.
+      - name: Release APK
+        if: env.VERSION != ''
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANTENNA_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANTENNA_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANTENNA_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$ANTENNA_KEYSTORE_PASSWORD" ] ||
+            [ -z "$ANTENNA_KEY_ALIAS" ] || [ -z "$ANTENNA_KEY_PASSWORD" ]; then
+            echo "::error::The release signing secrets aren't set (see the top of .github/workflows/ci.yaml)"
+            exit 1
+          fi
+          export ANTENNA_KEYSTORE="$RUNNER_TEMP/release.keystore"
+          trap 'rm -f "$ANTENNA_KEYSTORE"' EXIT
+          base64 -d <<< "$KEYSTORE_BASE64" > "$ANTENNA_KEYSTORE"
+          ./gradlew assembleRelease -PantennaVersion="$VERSION"
+
+      # Fails if the APK isn't signed with the release key. Prints the
+      # certificate, to compare with an installed copy.
+      - name: Check the signature
+        if: env.VERSION != ''
+        run: |
+          apksigner=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -1)
+          apk=app/build/outputs/apk/release/app-release.apk
+          "$apksigner" verify --print-certs "$apk" | tee "$RUNNER_TEMP/certs.txt"
+          if grep -q 'CN=Android Debug' "$RUNNER_TEMP/certs.txt"; then
+            echo "::error::The release APK is signed with a debug key"
+            exit 1
+          fi
+          mkdir -p dist
+          cp "$apk" "dist/antenna-v$VERSION.apk"
+          (cd dist && sha256sum "antenna-v$VERSION.apk" > "antenna-v$VERSION.apk.sha256")
+
+      - name: Upload release APK
+        if: env.VERSION != ''
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    needs: [plan, build]
+    if: needs.plan.outputs.version != '' && needs.build.result == 'success'
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write # the tag and the release
+      pull-requests: read # the merged pull requests' commits, for the notes
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the commits since the previous release
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: release
+          path: dist
+
+      # The commits of the pull requests merged since the previous release,
+      # by area (.github/scripts/release-notes.sh), above GitHub's generated
+      # notes, which list only the pull requests. Without them (first
+      # release, or the script failed) the release still goes out.
+      - name: Release notes
+        if: needs.plan.outputs.previous != ''
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PREVIOUS: ${{ needs.plan.outputs.previous }}
+        run: |
+          .github/scripts/release-notes.sh "$PREVIOUS" "$GITHUB_SHA" > "$RUNNER_TEMP/notes.md"
+          cat "$RUNNER_TEMP/notes.md" >> "$GITHUB_STEP_SUMMARY"
+
+      # Tags created with GITHUB_TOKEN don't trigger workflows, so this won't
+      # run again for the tag. A pushed tag already exists: the release uses it.
+      - name: Tag and create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: v${{ needs.plan.outputs.version }}
+          PREVIOUS: ${{ needs.plan.outputs.previous }}
+        run: |
+          args=(--repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --title "$VERSION" --generate-notes)
+          if [ -n "$PREVIOUS" ]; then
+            args+=(--notes-start-tag "$PREVIOUS")
+          fi
+          if [ -s "$RUNNER_TEMP/notes.md" ]; then
+            args+=(--notes-file "$RUNNER_TEMP/notes.md")
+          fi
+          if [[ "$VERSION" == *-* ]]; then
+            args+=(--prerelease)
+          fi
+          gh release create "$VERSION" "${args[@]}" dist/*
