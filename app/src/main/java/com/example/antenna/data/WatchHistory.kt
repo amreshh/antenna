@@ -1,6 +1,7 @@
 package com.example.antenna.data
 
 import android.content.Context
+import android.util.AtomicFile
 import android.util.Log
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -12,10 +13,15 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.json.JSONArray
 import org.json.JSONObject
 import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeStreamLinkHandlerFactory
 import java.io.File
+import java.io.FileNotFoundException
+import java.io.FileOutputStream
+import java.io.IOException
 
 data class WatchEntry(
     val video: VideoItem,
@@ -28,20 +34,32 @@ data class WatchEntry(
     val fraction: Float
         get() = if (durationMs <= 0) 0f else (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
 
-    /** Same idea as YouTube: counts as watched once you're near the end. */
+    /**
+     * Same idea as YouTube: counts as watched once you're near the end, meaning 90% in, or
+     * in the last 30 seconds once you're past halfway (the end screens of shorter videos).
+     * Without the halfway check, a video under 30 seconds counted as watched as soon as
+     * it was opened.
+     */
     val isWatched: Boolean
-        get() = durationMs > 0 && (fraction >= 0.9f || durationMs - positionMs < 30_000)
+        get() = durationMs > 0 &&
+            (fraction >= 0.9f || (fraction >= 0.5f && durationMs - positionMs < 30_000))
 }
 
 /**
  * Local watch history (nothing leaves the phone). Stored as JSON in the app's files
- * folder, loaded once at startup, and saved a second after the last change.
+ * folder and loaded once at startup.
+ *
+ * Saving rewrites the whole file, so while a video plays (its position is recorded every
+ * few seconds) it's written at most every [SAVE_DELAY_MS]. Removing or clearing history,
+ * and [flush] (the player calls it when it goes to the background), write right away.
+ * Writes go through [AtomicFile] one at a time, so the file is never half-written.
  */
 class WatchHistoryStore private constructor(context: Context) {
 
-    private val file = File(context.filesDir, "watch_history.json")
+    private val file = AtomicFile(File(context.filesDir, "watch_history.json"))
     private val io = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var saveJob: Job? = null
+    private val writeLock = Mutex()
+    private var pendingSave: Job? = null
 
     /** Keyed by YouTube video id. */
     private val _entries = MutableStateFlow(load())
@@ -63,18 +81,25 @@ class WatchHistoryStore private constructor(context: Context) {
             )
             trim(map + (id to entry))
         }
-        scheduleSave()
+        saveSoon()
     }
 
     fun remove(url: String) {
         val id = videoIdOf(url) ?: return
         _entries.update { it - id }
-        scheduleSave()
+        flush()
     }
 
     fun clear() {
         _entries.value = emptyMap()
-        scheduleSave()
+        flush()
+    }
+
+    /** Writes the history now, instead of when the pending save is due. */
+    fun flush() {
+        pendingSave?.cancel()
+        pendingSave = null
+        io.launch { write() }
     }
 
     /** Keeps the newest [MAX_ENTRIES]; only the newest [MAX_WITH_RELATED] keep their related lists. */
@@ -85,32 +110,44 @@ class WatchHistoryStore private constructor(context: Context) {
         }.toMap()
     }
 
-    private fun scheduleSave() {
-        saveJob?.cancel()
-        saveJob = io.launch {
-            delay(1000)
-            val json = JSONArray()
-            _entries.value.forEach { (_, e) ->
-                json.put(
-                    JSONObject()
-                        .put("video", e.video.toJson())
-                        .put("pos", e.positionMs)
-                        .put("dur", e.durationMs)
-                        .put("at", e.lastWatchedAt)
-                        .put("related", JSONArray().apply { e.related.forEach { put(it.toJson()) } }),
-                )
-            }
-            runCatching {
-                val tmp = File(file.parentFile, file.name + ".tmp")
-                tmp.writeText(json.toString())
-                tmp.renameTo(file)
-            }.onFailure { Log.w("History", "Save failed", it) }
+    /** Saves in [SAVE_DELAY_MS], unless a save is already due: that one writes the latest state. */
+    private fun saveSoon() {
+        if (pendingSave?.isActive == true) return
+        pendingSave = io.launch {
+            delay(SAVE_DELAY_MS)
+            write()
+        }
+    }
+
+    private suspend fun write() = writeLock.withLock {
+        val json = JSONArray()
+        _entries.value.forEach { (_, e) ->
+            json.put(
+                JSONObject()
+                    .put("video", e.video.toJson())
+                    .put("pos", e.positionMs)
+                    .put("dur", e.durationMs)
+                    .put("at", e.lastWatchedAt)
+                    .put("related", JSONArray().apply { e.related.forEach { put(it.toJson()) } }),
+            )
+        }
+        var out: FileOutputStream? = null
+        try {
+            out = file.startWrite()
+            out.write(json.toString().toByteArray())
+            file.finishWrite(out)
+        } catch (e: IOException) {
+            out?.let(file::failWrite)
+            Log.w("History", "Save failed", e)
         }
     }
 
     private fun load(): Map<String, WatchEntry> = runCatching {
-        if (!file.exists()) return@runCatching emptyMap()
-        val arr = JSONArray(file.readText())
+        val arr = try {
+            JSONArray(String(file.readFully()))
+        } catch (_: FileNotFoundException) {
+            return@runCatching emptyMap() // nothing watched yet
+        }
         (0 until arr.length()).mapNotNull { i ->
             val o = arr.getJSONObject(i)
             val video = videoFromJson(o.getJSONObject("video"))
@@ -132,6 +169,7 @@ class WatchHistoryStore private constructor(context: Context) {
     companion object {
         private const val MAX_ENTRIES = 1000
         private const val MAX_WITH_RELATED = 50
+        private const val SAVE_DELAY_MS = 10_000L
 
         @Volatile
         private var instance: WatchHistoryStore? = null
@@ -147,8 +185,14 @@ private val ID_PATTERN = Regex("""(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([\w-
 
 /** YouTube video id from any watch / youtu.be / shorts link. */
 fun videoIdOf(url: String): String? =
+    youtubeVideoId(url) ?: ID_PATTERN.find(url)?.groupValues?.get(1)
+
+/** The id of a YouTube video link, or null for any other link (no guessing from the URL's shape). */
+fun youtubeVideoId(url: String): String? =
     runCatching { YoutubeStreamLinkHandlerFactory.getInstance().getId(url) }.getOrNull()
-        ?: ID_PATTERN.find(url)?.groupValues?.get(1)
+
+/** The canonical link to a video. */
+fun watchUrl(videoId: String): String = "https://www.youtube.com/watch?v=$videoId"
 
 private fun VideoItem.toJson(): JSONObject = JSONObject()
     .put("url", url)

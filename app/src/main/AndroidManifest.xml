@@ -1,10 +1,19 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
 
+    <!--
+    Watch history and subscriptions stay on the phone, not in a Google Drive backup:
+    dataExtractionRules on Android 12+ (device-to-device transfer to a new phone still
+    works), allowBackup="false" before that (so no fullBackupContent is needed).
+    -->
     <application
         android:name=".App"
+        android:allowBackup="false"
+        android:dataExtractionRules="@xml/data_extraction_rules"
+        tools:ignore="DataExtractionRules"
         android:icon="@mipmap/ic_launcher"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:label="@string/app_name"
@@ -20,17 +29,25 @@
             </intent-filter>
         </activity>
 
-        <!-- Also opens youtube.com / youtu.be links shared from other apps -->
+        <!--
+        Also opens YouTube video links shared from or opened in other apps. singleTop: a link
+        shared while the player is open plays there (Back returns to the previous video)
+        instead of stacking a second player. The config changes are handled by the player
+        itself, so rotating, resizing or switching dark mode doesn't restart the video.
+        -->
         <activity
             android:name=".ui.PlayerActivity"
             android:exported="true"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden">
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="text/plain" />
             </intent-filter>
-            <intent-filter>
+            <!-- Video links only: channels and playlists are left to the YouTube app or the browser.
+                 Not App Links (autoVerify): youtube.com can't be verified for this app. -->
+            <intent-filter tools:ignore="AppLinkWarning">
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
@@ -38,6 +55,16 @@
                 <data android:host="www.youtube.com" />
                 <data android:host="m.youtube.com" />
                 <data android:host="youtube.com" />
+                <data android:pathPrefix="/watch" />
+                <data android:pathPrefix="/shorts/" />
+                <data android:pathPrefix="/live/" />
+                <data android:pathPrefix="/embed/" />
+            </intent-filter>
+            <intent-filter tools:ignore="AppLinkWarning">
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="https" />
                 <data android:host="youtu.be" />
             </intent-filter>
         </activity>

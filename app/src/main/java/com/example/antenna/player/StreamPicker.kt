@@ -3,9 +3,11 @@ package com.example.antenna.player
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
+import androidx.media3.common.MimeTypes
 import androidx.media3.common.util.UnstableApi
 import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.hls.HlsMediaSource
+import androidx.media3.exoplayer.mediacodec.MediaCodecUtil
 import androidx.media3.exoplayer.source.MediaSource
 import androidx.media3.exoplayer.source.MergingMediaSource
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
@@ -52,15 +54,22 @@ object StreamPicker {
             MediaItem.Builder().setUri(stream.content).setMediaMetadata(metadata).build(),
         )
 
+        // Only codecs this device can decode (a stream it can't would play as audio only),
+        // and hardware decoding first: 1440p in VP9 decoded in software stutters where
+        // 1080p in H.264 plays smoothly.
+        val decoders = HashMap<String?, Decoding>()
         val video = info.videoOnlyStreams
             .filter { it.isPlayable() && it.height in 1..maxHeight }
+            .map { it to decoders.getOrPut(it.codec) { decodingOf(it.codec) } }
+            .filter { (_, decoding) -> decoding != Decoding.NONE }
             .sortedWith(
-                compareByDescending<VideoStream> { it.height }
+                compareBy<Pair<VideoStream, Decoding>> { (_, decoding) -> decoding.ordinal }
+                    .thenByDescending { (stream, _) -> stream.height }
                     // at equal height prefer H.264 (hardware decoding on nearly every phone)
-                    .thenBy { if (it.codec?.startsWith("avc") == true) 0 else 1 }
-                    .thenByDescending { it.fps },
+                    .thenBy { (stream, _) -> if (stream.codec?.startsWith("avc") == true) 0 else 1 }
+                    .thenByDescending { (stream, _) -> stream.fps },
             )
-            .firstOrNull()
+            .firstOrNull()?.first
 
         val audio = info.audioStreams
             .filter { it.isPlayable() }
@@ -88,4 +97,22 @@ object StreamPicker {
 
     private fun Stream.isPlayable() =
         isUrl && deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP && content.isNotEmpty()
+
+    /** In order of preference. */
+    private enum class Decoding { HARDWARE, SOFTWARE, NONE }
+
+    /** How this device can decode a codec, e.g. "avc1.640028", "vp09.00.40.08", "av01.0.08M.08". */
+    private fun decodingOf(codec: String?): Decoding {
+        val mime = codec?.let(MimeTypes::getVideoMediaMimeType) ?: return Decoding.SOFTWARE // unknown: let ExoPlayer try
+        val decoders = try {
+            MediaCodecUtil.getDecoderInfos(mime, /* secure = */ false, /* tunneling = */ false)
+        } catch (_: MediaCodecUtil.DecoderQueryException) {
+            return Decoding.SOFTWARE
+        }
+        return when {
+            decoders.any { it.hardwareAccelerated } -> Decoding.HARDWARE
+            decoders.isNotEmpty() -> Decoding.SOFTWARE
+            else -> Decoding.NONE
+        }
+    }
 }

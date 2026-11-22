@@ -1,10 +1,13 @@
 package com.example.antenna
 
 import android.app.Application
+import com.example.antenna.data.SubscriptionStore
+import com.example.antenna.data.WatchHistoryStore
 import com.example.antenna.net.OkHttpDownloader
 import okhttp3.OkHttpClient
 import org.schabi.newpipe.extractor.NewPipe
 import java.util.concurrent.TimeUnit
+import kotlin.concurrent.thread
 
 class App : Application() {
 
@@ -21,5 +24,11 @@ class App : Application() {
             .readTimeout(30, TimeUnit.SECONDS)
             .build()
         NewPipe.init(OkHttpDownloader(http))
+        // Read the watch history and subscriptions while the first screen is being set up,
+        // instead of on the main thread when a screen first needs them.
+        thread(name = "load-stores") {
+            WatchHistoryStore.get(this)
+            SubscriptionStore.get(this)
+        }
     }
 }

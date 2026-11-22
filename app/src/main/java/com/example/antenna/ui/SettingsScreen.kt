@@ -2,6 +2,7 @@ package com.example.antenna.ui
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -41,6 +42,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var categories by remember { mutableStateOf(prefs.skipCategories) }
     var maxHeight by remember { mutableIntStateOf(prefs.maxHeight) }
     var hideWatched by remember { mutableStateOf(prefs.hideWatched) }
+    var reportSkips by remember { mutableStateOf(prefs.reportSkips) }
 
     Scaffold(
         topBar = {
@@ -63,6 +65,20 @@ fun SettingsScreen(onBack: () -> Unit) {
                     prefs.skipCategories = categories
                 }) {
                     Switch(checked = on, onCheckedChange = null)
+                }
+            }
+
+            item {
+                SettingRow(
+                    "Count my skips on SponsorBlock",
+                    detail = "Adds to the segment's public view count. The report names the " +
+                        "segment, so SponsorBlock learns which video you watched.",
+                    onClick = {
+                        reportSkips = !reportSkips
+                        prefs.reportSkips = reportSkips
+                    },
+                ) {
+                    Switch(checked = reportSkips, onCheckedChange = null)
                 }
             }
 
@@ -107,16 +123,30 @@ private fun Header(text: String) = Text(
 )
 
 @Composable
-private fun SettingRow(label: String, onClick: () -> Unit, trailing: @Composable () -> Unit) {
+private fun SettingRow(
+    label: String,
+    onClick: () -> Unit,
+    detail: String? = null,
+    trailing: @Composable () -> Unit,
+) {
     Row(
         Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.SpaceBetween,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
     ) {
-        Text(label, Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(label)
+            if (detail != null) {
+                Text(
+                    detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         trailing()
     }
 }

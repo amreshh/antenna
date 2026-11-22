@@ -31,7 +31,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
@@ -55,13 +55,13 @@ fun FeedTab(
     onManage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val state by vm.state.collectAsState()
-    val channels by vm.channels.collectAsState()
+    val state by vm.state.collectAsStateWithLifecycle()
+    val channels by vm.channels.collectAsStateWithLifecycle()
     val context = LocalContext.current
     // re-read each time the tab is shown, so the Settings toggle applies immediately
     val hideWatched = remember { Prefs(context).hideWatched }
     val history = remember(context) { WatchHistoryStore.get(context) }
-    val watched by history.entries.collectAsState()
+    val watched by history.entries.collectAsStateWithLifecycle()
     val visible = remember(state.items, watched, hideWatched) {
         if (!hideWatched) state.items
         else state.items.filterNot { v -> videoIdOf(v.url)?.let { watched[it]?.isWatched } == true }
@@ -128,17 +128,14 @@ fun FeedTab(
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChannelsScreen(vm: FeedViewModel, onBack: () -> Unit) {
-    val channels by vm.channels.collectAsState()
+    val channels by vm.channels.collectAsStateWithLifecycle()
     val context = LocalContext.current
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
-        val message = runCatching {
-            val csv = context.contentResolver.openInputStream(uri)!!.bufferedReader().use { it.readText() }
-            val added = vm.importTakeout(csv)
-            if (added == 0) "No new channels found in that file" else "Imported $added channels"
-        }.getOrElse { "Couldn't read that file: ${it.message}" }
-        Toast.makeText(context, message, Toast.LENGTH_LONG).show()
+        // The application context: the import can outlive this screen.
+        val app = context.applicationContext
+        vm.importTakeout(uri) { message -> Toast.makeText(app, message, Toast.LENGTH_LONG).show() }
     }
 
     Scaffold(

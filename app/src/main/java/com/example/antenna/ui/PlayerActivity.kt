@@ -1,10 +1,13 @@
 package com.example.antenna.ui
 
+import android.content.ActivityNotFoundException
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
+import android.net.Uri
 import android.os.Bundle
+import android.view.WindowManager
 import android.widget.Toast
 import androidx.activity.ComponentActivity
 import androidx.activity.addCallback
@@ -34,24 +37,33 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.collectAsState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.UriHandler
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.testTagsAsResourceId
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import androidx.core.net.toUri
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import androidx.media3.common.AudioAttributes
 import androidx.media3.common.C
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
@@ -64,6 +76,8 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.SpanStyle
+import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.fromHtml
 import androidx.compose.ui.text.style.TextOverflow
 import com.example.antenna.data.ageLabel
@@ -77,8 +91,11 @@ import com.example.antenna.data.WatchHistoryStore
 import com.example.antenna.data.YouTubeRepository
 import com.example.antenna.data.formatDuration
 import com.example.antenna.data.normalizeChannelUrl
+import com.example.antenna.data.pick
 import com.example.antenna.data.toVideoItem
 import com.example.antenna.data.videoIdOf
+import com.example.antenna.data.watchUrl
+import com.example.antenna.data.youtubeVideoId
 import com.example.antenna.player.StreamPicker
 import com.example.antenna.sponsorblock.Segment
 import com.example.antenna.sponsorblock.SponsorBlockClient
@@ -91,6 +108,13 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
+
+/**
+ * Test tags for the player's state, visible to UI Automator as resource ids: the smoke test
+ * (.github/scripts/smoke-test.sh) reads them to tell a loaded video from an error.
+ */
+internal const val TAG_TITLE = "player_title"
+internal const val TAG_ERROR = "player_error"
 
 sealed interface PlayerUiState {
     data object Loading : PlayerUiState
@@ -106,7 +130,8 @@ sealed interface PlayerUiState {
         val related: List<VideoItem>,
         /** "1.2M views · 3 days ago" */
         val stats: String = "",
-        val description: AnnotatedString = AnnotatedString(""),
+        /** As YouTube sends it (HTML with links); shown by [DescriptionBox]. */
+        val description: Description? = null,
     ) : PlayerUiState
 }
 
@@ -119,6 +144,11 @@ class PlayerActivity : ComponentActivity() {
 
         /** Resume only if you got past this point and aren't basically finished. */
         private const val RESUME_MIN_MS = 10_000L
+
+        // Kept when Android recreates the screen, so it comes back on the same video.
+        private const val STATE_URL = "url"
+        private const val STATE_BACK_STACK = "back_stack"
+        private const val STATE_FULLSCREEN = "fullscreen"
 
         fun intent(context: Context, url: String): Intent =
             Intent(context, PlayerActivity::class.java).putExtra(EXTRA_URL, url)
@@ -150,35 +180,53 @@ class PlayerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val url = resolveUrl(intent)
+        val url = savedInstanceState?.getString(STATE_URL) ?: resolveUrl(intent)
         if (url == null) {
-            Toast.makeText(this, "Not a YouTube link", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Not a YouTube video link", Toast.LENGTH_SHORT).show()
             finish()
             return
         }
+        savedInstanceState?.getStringArrayList(STATE_BACK_STACK)?.let(backStack::addAll)
+        userFullscreen.value = savedInstanceState?.getBoolean(STATE_FULLSCREEN) == true
 
         prefs = Prefs(this)
-        player = ExoPlayer.Builder(this).build().apply {
-            addListener(object : Player.Listener {
-                override fun onPlayerError(error: PlaybackException) {
-                    uiState.value = PlayerUiState.Error(
-                        "Playback failed (${error.errorCodeName}): ${error.cause?.message ?: error.message}",
-                    )
-                }
+        player = ExoPlayer.Builder(this)
+            // Pause for calls and other apps' audio, and when headphones are unplugged
+            // (instead of carrying on through the speaker).
+            .setAudioAttributes(
+                AudioAttributes.Builder()
+                    .setUsage(C.USAGE_MEDIA)
+                    .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+                    .build(),
+                /* handleAudioFocus = */ true,
+            )
+            .setHandleAudioBecomingNoisy(true)
+            .build()
+        player.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                uiState.value = PlayerUiState.Error(
+                    "Playback failed (${error.errorCodeName}): ${error.cause?.message ?: error.message}",
+                )
+            }
 
-                override fun onPlaybackStateChanged(state: Int) {
-                    if (state == Player.STATE_ENDED) saveProgress()
-                }
+            override fun onPlaybackStateChanged(state: Int) {
+                if (state == Player.STATE_ENDED) saveProgress()
+            }
 
-                override fun onIsPlayingChanged(isPlaying: Boolean) {
-                    if (!isPlaying) saveProgress()
+            override fun onIsPlayingChanged(isPlaying: Boolean) {
+                // Keep the screen on while a video plays, not while it's paused.
+                if (isPlaying) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    saveProgress()
                 }
-            })
-        }
+            }
+        })
 
         setContent {
             AntennaTheme {
-                val subscribed by subscriptions.channels.collectAsState()
+                val subscribed by subscriptions.channels.collectAsStateWithLifecycle()
                 val state = uiState.value
                 val config = LocalConfiguration.current
                 // A phone on its side has no room for anything but the video. A tablet held
@@ -198,6 +246,7 @@ class PlayerActivity : ComponentActivity() {
                     onToggleSubscribe = ::toggleSubscribe,
                     onSegmentClick = ::watchSegment,
                     onRelatedClick = { openVideo(it.url, addToBackStack = true) },
+                    onLink = ::openLink,
                 )
             }
         }
@@ -230,11 +279,25 @@ class PlayerActivity : ComponentActivity() {
         resolveUrl(intent)?.let { openVideo(it, addToBackStack = true) }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putString(STATE_URL, currentUrl)
+        outState.putStringArrayList(STATE_BACK_STACK, ArrayList(backStack))
+        outState.putBoolean(STATE_FULLSCREEN, userFullscreen.value)
+    }
+
+    /** Rotation, resizing and dark mode are handled here (see the manifest) rather than by restarting. */
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        enableEdgeToEdge() // the status bar icons follow dark mode
+    }
+
     override fun onStop() {
         super.onStop()
         if (::player.isInitialized) {
             saveProgress()
             player.pause()
+            history.flush() // the app may be closed from here without another chance to save
         }
     }
 
@@ -311,7 +374,7 @@ class PlayerActivity : ComponentActivity() {
                     stats = listOf(formatViews(info.viewCount), video.ageLabel())
                         .filter { it.isNotBlank() }
                         .joinToString(" · "),
-                    description = descriptionText(info.description),
+                    description = info.description,
                 )
                 uiState.value = ready
 
@@ -339,8 +402,7 @@ class PlayerActivity : ComponentActivity() {
             Channel(
                 url = url,
                 name = info.uploaderName.orEmpty(),
-                avatarUrl = info.uploaderAvatars.sortedBy { it.height }
-                    .firstOrNull { it.height >= 48 }?.url ?: info.uploaderAvatars.lastOrNull()?.url,
+                avatarUrl = info.uploaderAvatars.pick(minHeight = 120), // 40dp at up to 3x
             )
         }
 
@@ -360,7 +422,7 @@ class PlayerActivity : ComponentActivity() {
                         "Skipped: ${SponsorCategory.labelFor(seg.category)}",
                         Toast.LENGTH_SHORT,
                     ).show()
-                    if (reported.add(seg.uuid)) sponsorBlock.reportSkip(seg.uuid)
+                    if (prefs.reportSkips && reported.add(seg.uuid)) sponsorBlock.reportSkip(seg.uuid)
                 }
             }
             delay(200)
@@ -384,13 +446,40 @@ class PlayerActivity : ComponentActivity() {
         player.play()
     }
 
+    /**
+     * The video to play. Other apps can start this screen with anything, so only the video
+     * id is taken from what they send, and the link is rebuilt from it.
+     */
     private fun resolveUrl(intent: Intent): String? {
-        intent.getStringExtra(EXTRA_URL)?.let { return it }
-        return when (intent.action) {
+        val link = intent.getStringExtra(EXTRA_URL) ?: when (intent.action) {
             Intent.ACTION_VIEW -> intent.dataString
             Intent.ACTION_SEND -> intent.getStringExtra(Intent.EXTRA_TEXT)
                 ?.let { YOUTUBE_URL.find(it)?.value }
             else -> null
+        }
+        return link?.let(::videoIdOf)?.let(::watchUrl)
+    }
+
+    /**
+     * A link tapped in the description: a timestamp in this video seeks to it, another
+     * YouTube video opens here (Back returns), and other web links open in the browser.
+     * Links that aren't http(s) are ignored.
+     */
+    private fun openLink(link: String) {
+        val uri = link.toUri()
+        if (uri.scheme != "https" && uri.scheme != "http") return
+        val id = youtubeVideoId(link)
+        when {
+            id == null -> try {
+                startActivity(Intent(Intent.ACTION_VIEW, uri).addCategory(Intent.CATEGORY_BROWSABLE))
+            } catch (_: ActivityNotFoundException) {
+                Toast.makeText(this, "No app can open this link", Toast.LENGTH_SHORT).show()
+            }
+            id != currentUrl?.let(::videoIdOf) -> openVideo(watchUrl(id), addToBackStack = true)
+            else -> startSeconds(uri)?.let { seconds ->
+                player.seekTo(seconds * 1000)
+                player.play()
+            }
         }
     }
 
@@ -416,6 +505,7 @@ class PlayerActivity : ComponentActivity() {
 }
 
 @OptIn(UnstableApi::class)
+@kotlin.OptIn(ExperimentalComposeUiApi::class) // testTagsAsResourceId
 @Composable
 private fun PlayerScreen(
     player: Player,
@@ -427,13 +517,13 @@ private fun PlayerScreen(
     onToggleSubscribe: () -> Unit,
     onSegmentClick: (Segment) -> Unit,
     onRelatedClick: (VideoItem) -> Unit,
+    onLink: (String) -> Unit,
 ) {
     val video = @Composable { modifier: Modifier ->
         AndroidView(
             factory = { ctx ->
                 PlayerView(ctx).apply {
                     this.player = player
-                    keepScreenOn = true
                     setBackgroundColor(android.graphics.Color.BLACK)
                 }
             },
@@ -460,8 +550,12 @@ private fun PlayerScreen(
         Column(Modifier.padding(16.dp)) {
             when (state) {
                 PlayerUiState.Loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
-                is PlayerUiState.Error -> Text(state.message, color = MaterialTheme.colorScheme.error)
-                is PlayerUiState.Ready -> VideoDetails(state, isSubscribed, onToggleSubscribe, onSegmentClick)
+                is PlayerUiState.Error -> Text(
+                    state.message,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.testTag(TAG_ERROR),
+                )
+                is PlayerUiState.Ready -> VideoDetails(state, isSubscribed, onToggleSubscribe, onSegmentClick, onLink)
             }
         }
     }
@@ -491,6 +585,7 @@ private fun PlayerScreen(
         .fillMaxSize()
         .background(MaterialTheme.colorScheme.background)
         .safeDrawingPadding()
+        .semantics { testTagsAsResourceId = true }
 
     if (isExpandedWindow()) {
         // Tablet / big screen: video and details on the left, Up next alongside it.
@@ -521,8 +616,9 @@ private fun VideoDetails(
     isSubscribed: Boolean,
     onToggleSubscribe: () -> Unit,
     onSegmentClick: (Segment) -> Unit,
+    onLink: (String) -> Unit,
 ) {
-    Text(state.title, style = MaterialTheme.typography.titleMedium)
+    Text(state.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag(TAG_TITLE))
     Row(
         Modifier.fillMaxWidth().padding(top = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -544,7 +640,7 @@ private fun VideoDetails(
         }
     }
 
-    DescriptionBox(state.stats, state.description)
+    DescriptionBox(state.stats, state.description, onLink)
 
     Text(
         "SponsorBlock",
@@ -582,9 +678,18 @@ private fun VideoDetails(
 
 /** YouTube-style description: a tinted box with views and date, a few lines, tap for the rest. */
 @Composable
-private fun DescriptionBox(stats: String, description: AnnotatedString) {
-    if (stats.isBlank() && description.isBlank()) return
-    var expanded by rememberSaveable(description.text) { mutableStateOf(false) }
+private fun DescriptionBox(stats: String, description: Description?, onLink: (String) -> Unit) {
+    val linkColor = MaterialTheme.colorScheme.primary
+    val text = remember(description, linkColor) { descriptionText(description, linkColor) }
+    if (stats.isBlank() && text.isBlank()) return
+    var expanded by rememberSaveable(text.text) { mutableStateOf(false) }
+    // Links in the description go to the player (timestamps, other videos) instead of
+    // straight to another app.
+    val links = remember(onLink) {
+        object : UriHandler {
+            override fun openUri(uri: String) = onLink(uri)
+        }
+    }
     Column(
         Modifier
             .fillMaxWidth()
@@ -595,14 +700,16 @@ private fun DescriptionBox(stats: String, description: AnnotatedString) {
             .padding(12.dp),
     ) {
         if (stats.isNotBlank()) Text(stats, style = MaterialTheme.typography.labelLarge)
-        if (description.isNotBlank()) {
-            Text(
-                description,
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = if (expanded) Int.MAX_VALUE else 3,
-                overflow = TextOverflow.Ellipsis,
-                modifier = Modifier.padding(top = 4.dp),
-            )
+        if (text.isNotBlank()) {
+            CompositionLocalProvider(LocalUriHandler provides links) {
+                Text(
+                    text,
+                    style = MaterialTheme.typography.bodyMedium,
+                    maxLines = if (expanded) Int.MAX_VALUE else 3,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
         }
         Text(
             if (expanded) "Show less" else "…more",
@@ -612,12 +719,26 @@ private fun DescriptionBox(stats: String, description: AnnotatedString) {
     }
 }
 
-private fun descriptionText(description: Description?): AnnotatedString {
+private fun descriptionText(description: Description?, linkColor: Color): AnnotatedString {
     val content = description?.content.orEmpty().trim()
     if (content.isEmpty()) return AnnotatedString("")
-    // YouTube sends HTML (links, line breaks); fromHtml keeps the links tappable.
-    return if (description?.type == Description.HTML) AnnotatedString.fromHtml(content)
-    else AnnotatedString(content)
+    // YouTube sends HTML (links, line breaks); fromHtml keeps the links tappable, and the
+    // color shows which parts are links.
+    return if (description?.type == Description.HTML) {
+        AnnotatedString.fromHtml(content, linkStyles = TextLinkStyles(SpanStyle(color = linkColor)))
+    } else {
+        AnnotatedString(content)
+    }
+}
+
+/** Where a link's `t=` asks to start, in seconds: "90", "90s" or "1h2m3s". */
+private fun startSeconds(uri: Uri): Long? {
+    val t = uri.getQueryParameter("t") ?: uri.getQueryParameter("start") ?: return null
+    t.toLongOrNull()?.let { return it }
+    val (h, m, s) = Regex("""(?:(\d+)h)?(?:(\d+)m)?(?:(\d+)s)?""").matchEntire(t)?.destructured
+        ?: return null
+    if (h.isEmpty() && m.isEmpty() && s.isEmpty()) return null
+    return (h.toLongOrNull() ?: 0) * 3600 + (m.toLongOrNull() ?: 0) * 60 + (s.toLongOrNull() ?: 0)
 }
 
 private fun formatViews(count: Long): String = when {
