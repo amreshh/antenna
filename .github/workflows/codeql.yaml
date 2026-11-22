@@ -8,11 +8,15 @@ name: codeql
 # on the pull request.
 #
 # Kotlin is only analysed while CodeQL watches it being compiled (build-mode
-# none reads Java source only, and the app is all Kotlin), so that job runs a
-# debug build with Gradle's caches off: a task restored from the cache
-# compiles nothing for CodeQL to see. CodeQL supports Kotlin versions some
+# none reads Java source only, and the app is all Kotlin), so that job compiles
+# the app with Gradle's build cache off: a task restored from the cache
+# compiles nothing for CodeQL to see. (The runner starts without build output,
+# so nothing is up to date either.) CodeQL supports Kotlin versions some
 # months after they ship: if extraction fails after a Kotlin bump, update
 # the codeql-action pins (Dependabot does) or wait for a release that knows it.
+#
+# On main, this also saves Gradle's downloads to the Actions cache, which the
+# ci workflow's pull request and dev builds restore. (Releases use no cache.)
 on:
   push:
     branches: [main]
@@ -58,18 +62,17 @@ jobs:
         uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
-          java-version: 21
+          java-version: 25 # what gradle/gradle-daemon-jvm.properties asks for
 
-      # Downloads only: the build itself must run in full (below). Also checks
+      # Gradle's downloads (saved on main, restored elsewhere), and a check
       # that the Gradle wrapper jar is genuine.
       - if: matrix.build-mode == 'manual'
         uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
-        with:
-          cache-read-only: true
 
+      # Compiling is all CodeQL needs to see: no dexing or packaging.
       - name: Build for CodeQL
         if: matrix.build-mode == 'manual'
-        run: ./gradlew assembleDebug --no-build-cache --no-configuration-cache --rerun-tasks
+        run: ./gradlew compileDebugSources --no-build-cache --no-configuration-cache
 
       # The default setup's category, so alerts it found carry over.
       - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3

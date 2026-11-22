@@ -17,14 +17,20 @@ here=$(dirname "$0")
 
 # Each commit on main since the previous release stands for the commits of
 # the pull request it merged, or for itself when it was pushed directly.
-# Merge commits (e.g. main merged into dev) are left out.
+# Merge commits (e.g. main merged into dev) are left out. A pull request's
+# commits are listed once, however many of them are on main.
 shas=()
+declare -A listed_prs=()
 while read -r commit; do
   prs=$(gh api "repos/$repo/commits/$commit/pulls" --jq '.[] | select(.merged_at != null) | .number')
   if [ -z "$prs" ]; then
     shas+=("$commit")
   fi
   for pr in $prs; do
+    if [ -n "${listed_prs[$pr]:-}" ]; then
+      continue
+    fi
+    listed_prs[$pr]=1
     while read -r sha; do
       shas+=("$sha")
     done < <(gh api --paginate "repos/$repo/pulls/$pr/commits" --jq '.[] | select((.parents | length) == 1) | .sha')
