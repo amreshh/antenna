@@ -1,5 +1,8 @@
 package com.example.antenna.ui
 
+import com.example.antenna.data.videoIdOf
+import androidx.compose.material3.FilterChipDefaults
+import androidx.compose.material3.FilterChip
 import android.content.ActivityNotFoundException
 import android.content.Intent
 import android.widget.Toast
@@ -37,6 +40,8 @@ import androidx.compose.material3.LocalContentColor
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -147,6 +152,8 @@ internal fun PlayerSheet(
     val subscribed by vm.subscribedChannels.collectAsStateWithLifecycle()
     val isSubscribed = (state as? PlayerUiState.Ready)?.channel?.url
         ?.let { u -> subscribed.any { it.url == u } } == true
+    val watchLaterIds by vm.watchLaterIds.collectAsStateWithLifecycle()
+    val savedForLater = vm.currentUrl?.let(::videoIdOf)?.let { it in watchLaterIds } == true
 
     val sheet = rememberSheetState()
     sheet.draggable = !fullscreen
@@ -186,12 +193,15 @@ internal fun PlayerSheet(
         Column(Modifier.padding(16.dp)) {
             when (state) {
                 PlayerUiState.Loading -> LinearProgressIndicator(Modifier.fillMaxWidth())
-                is PlayerUiState.Error -> Text(
-                    state.message,
-                    color = MaterialTheme.colorScheme.error,
-                    modifier = Modifier.testTag(TAG_ERROR),
-                )
-                is PlayerUiState.Ready -> VideoDetails(state, isSubscribed, vm::toggleSubscribe, vm::watchSegment, onLink, onOpenChannel)
+                is PlayerUiState.Error -> ErrorMessage(state.message, onRetry = vm::retry)
+                is PlayerUiState.Ready -> {
+                    // A playback error keeps the details: the video may play after Try again.
+                    vm.playbackError?.let { ErrorMessage(it, onRetry = vm::retry, Modifier.padding(bottom = 12.dp)) }
+                    VideoDetails(
+                        state, isSubscribed, vm::toggleSubscribe, vm::watchSegment, onLink, onOpenChannel,
+                        savedForLater = savedForLater, onToggleWatchLater = vm::toggleWatchLater,
+                    )
+                }
             }
         }
     }
@@ -203,7 +213,7 @@ internal fun PlayerSheet(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
             )
-            related.forEach { item -> VideoRow(item, onClick = { vm.openLink(item.url) }) }
+            related.forEach { item -> VideoRow(item, onClick = { vm.openLink(item.url) }, trailing = { VideoMenu(item) }) }
         }
     }
 
@@ -502,6 +512,15 @@ private fun QualityButton(
     }
 }
 
+/** An error, tagged for the smoke test, with a way to try again. */
+@Composable
+private fun ErrorMessage(message: String, onRetry: () -> Unit, modifier: Modifier = Modifier) {
+    Column(modifier) {
+        Text(message, color = MaterialTheme.colorScheme.error, modifier = Modifier.testTag(TAG_ERROR))
+        TextButton(onClick = onRetry, contentPadding = PaddingValues(0.dp)) { Text("Try again") }
+    }
+}
+
 private fun lerp(start: Int, stop: Int, fraction: Float): Int = (start + (stop - start) * fraction).roundToInt()
 
 @Composable
@@ -512,6 +531,8 @@ private fun VideoDetails(
     onSegmentClick: (Segment) -> Unit,
     onLink: (String) -> Unit,
     onOpenChannel: (Channel) -> Unit,
+    savedForLater: Boolean,
+    onToggleWatchLater: () -> Unit,
 ) {
     Text(state.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag(TAG_TITLE))
     Row(
@@ -557,6 +578,22 @@ private fun VideoDetails(
                 Button(onClick = onToggleSubscribe) { Text("Subscribe") }
             }
         }
+    }
+
+    // Actions on the video, like YouTube's row under the channel.
+    Row(Modifier.padding(top = 8.dp)) {
+        FilterChip(
+            selected = savedForLater,
+            onClick = onToggleWatchLater,
+            label = { Text(if (savedForLater) "Saved for later" else "Watch later") },
+            leadingIcon = {
+                Icon(
+                    if (savedForLater) BookmarkIcon else BookmarkBorderIcon,
+                    contentDescription = null,
+                    modifier = Modifier.size(FilterChipDefaults.IconSize),
+                )
+            },
+        )
     }
 
     DescriptionBox(state.stats, state.description, onLink)

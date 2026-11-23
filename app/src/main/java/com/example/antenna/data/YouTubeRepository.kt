@@ -1,6 +1,9 @@
 package com.example.antenna.data
 
+import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
+import org.schabi.newpipe.extractor.channel.ChannelInfoItem
 import android.text.format.DateUtils
+import android.util.Log
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.Image
@@ -88,6 +91,31 @@ object YouTubeRepository {
         )
     }
 
+    /**
+     * A channel's avatar (for subscriptions imported without one), or null if it has none.
+     * First from a channel search for its name, about 15 KB, where the channel's own page is
+     * about 180 KB; the result has to be that channel (its id), else it's the page after all.
+     */
+    suspend fun channelAvatar(channel: Channel): String? = withContext(Dispatchers.IO) {
+        val searchable = channel.name.isNotBlank() && !Regex("""UC[\w-]{22}""").matches(channel.name) // Takeout's untitled ones
+        if (searchable) {
+            val found = try {
+                val search = youtube.getSearchExtractor(channel.name, listOf(YoutubeSearchQueryHandlerFactory.CHANNELS), "")
+                search.fetchPage()
+                search.initialPage.items.filterIsInstance<ChannelInfoItem>()
+                    .firstOrNull { normalizeChannelUrl(it.url) == channel.url }
+                    ?.thumbnails?.pick(CHANNEL_AVATAR_HEIGHT)
+            } catch (e: ReCaptchaException) {
+                throw e // YouTube is limiting requests: the page wouldn't come either
+            } catch (_: Exception) {
+                null
+            }
+            if (found != null) return@withContext found
+        }
+        Log.i("Avatars", "${channel.name}: not found by search, using the channel's page")
+        ChannelInfo.getInfo(youtube, channel.url).avatars.pick(CHANNEL_AVATAR_HEIGHT)
+    }
+
     /** The next page of a channel's videos, and the page after it (null at the end). */
     suspend fun channelMore(channel: Channel, videosTab: ListLinkHandler, page: Page): Pair<List<VideoItem>, Page?> =
         withContext(Dispatchers.IO) {
@@ -101,9 +129,28 @@ object YouTubeRepository {
             .map { it.toVideoItem(fallbackUploader = channel.name).copy(channelUrl = channel.url, channelAvatarUrl = channel.avatarUrl) }
             .distinctBy { it.url }
 
-    suspend fun streamInfo(url: String): StreamInfo = withContext(Dispatchers.IO) {
-        StreamInfo.getInfo(youtube, url)
+    /**
+     * A video's details and stream links. The last few are kept for [INFO_KEEP_MS], so going
+     * Back through Up next doesn't fetch them again; [fresh] fetches them anyway (new links,
+     * after a playback error). Links last some hours, far longer than they're kept.
+     */
+    suspend fun streamInfo(url: String, fresh: Boolean = false): StreamInfo = withContext(Dispatchers.IO) {
+        val id = videoIdOf(url)
+        val now = System.currentTimeMillis()
+        if (!fresh && id != null) {
+            synchronized(recentInfo) { recentInfo[id]?.takeIf { now - it.first < INFO_KEEP_MS }?.second }?.let { return@withContext it }
+        }
+        StreamInfo.getInfo(youtube, url).also { info ->
+            if (id != null) synchronized(recentInfo) { recentInfo[id] = now to info }
+        }
     }
+
+    /** The last [INFO_KEPT] videos' details, by id, with when they were fetched; least recently used first. */
+    private val recentInfo = object : LinkedHashMap<String, Pair<Long, StreamInfo>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Pair<Long, StreamInfo>>) = size > INFO_KEPT
+    }
+    private const val INFO_KEPT = 8
+    private const val INFO_KEEP_MS = 30 * 60 * 1000L
 
     private fun InfoItemsPage<InfoItem>.toSearchPage(): SearchPage {
         val videos = items.filterIsInstance<StreamInfoItem>()

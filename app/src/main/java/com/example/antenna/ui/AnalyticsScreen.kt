@@ -1,5 +1,7 @@
 package com.example.antenna.ui
 
+import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -9,22 +11,29 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.grid.GridCells
-import androidx.compose.foundation.lazy.grid.GridItemSpan
-import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.lazy.staggeredgrid.LazyVerticalStaggeredGrid
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridCells
+import androidx.compose.foundation.lazy.staggeredgrid.StaggeredGridItemSpan
+import androidx.compose.foundation.lazy.staggeredgrid.rememberLazyStaggeredGridState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.materialIcon
 import androidx.compose.material.icons.materialPath
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
@@ -52,54 +61,92 @@ import com.example.antenna.data.ChannelTime
 import com.example.antenna.data.TopicTime
 import com.example.antenna.data.WatchHistoryStore
 import com.example.antenna.data.WatchStats
+import com.example.antenna.data.channelKey
 import com.example.antenna.data.formatWatchTime
 import com.example.antenna.data.watchStats
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
+
+/** All of the history's numbers, and those of the channel picked in Top channels (if any). */
+private class AnalyticsNumbers(val all: WatchStats, val shown: WatchStats, val channel: ChannelTime?)
 
 /**
  * The Analytics tab: what your watch history says about your watching, worked out on the
  * phone (data/WatchStats.kt). Tiles for the headline numbers, then one chart per question,
- * each a single measure in one colour. Tap a bar for its value.
+ * each a single measure in one colour. Tap a bar for its value, a channel in Top channels for
+ * that channel's numbers alone (Back, or the bar at the top, shows everything again).
  */
 @Composable
 fun AnalyticsTab(onOpenChannel: (Channel) -> Unit, onSearch: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val store = remember(context) { WatchHistoryStore.get(context) }
     val entries by store.entries.collectAsStateWithLifecycle()
-    val stats = remember(entries) { watchStats(entries.values, System.currentTimeMillis()) }
+    val loaded by store.loaded.collectAsStateWithLifecycle()
+    /** The picked channel's key (ChannelTime.key), or null for every channel. */
+    var channelKey by rememberSaveable { mutableStateOf<String?>(null) }
+    BackHandler(enabled = channelKey != null) { channelKey = null }
 
-    if (stats.videos == 0) {
+    // Worked out off the main thread: it goes through up to 1000 videos, and the history
+    // changes every few seconds while a video plays.
+    val numbers by produceState<AnalyticsNumbers?>(null, entries, channelKey, loaded) {
+        if (!loaded) return@produceState // not "Nothing to show yet" while the history loads
+        value = withContext(Dispatchers.Default) {
+            val now = System.currentTimeMillis()
+            val all = watchStats(entries.values, now)
+            val channel = channelKey?.let { key -> all.topChannels.firstOrNull { it.key == key } }
+            val shown = if (channel == null) all else watchStats(entries.values.filter { it.channelKey() == channel.key }, now)
+            AnalyticsNumbers(all, shown, channel)
+        }
+    }
+    val n = numbers ?: return // a moment, the first time
+
+    if (n.all.videos == 0) {
         EmptyMessage("Nothing to show yet", "Watch a few videos and what you watch, and when, shows up here.", modifier)
         return
     }
 
     val wide = isWideWindow()
-    LazyVerticalGrid(
-        columns = if (wide) GridCells.Adaptive(minSize = 420.dp) else GridCells.Fixed(1),
+    val stats = n.shown
+    val grid = rememberLazyStaggeredGridState()
+    // Picking a channel adds the bar above everything else: show it, and the new numbers.
+    LaunchedEffect(n.channel?.key) { grid.scrollToItem(0) }
+    // Masonry on big screens: each column stacks its cards, so a tall card doesn't leave a
+    // gap beside a short one.
+    LazyVerticalStaggeredGrid(
+        columns = if (wide) StaggeredGridCells.Adaptive(minSize = 420.dp) else StaggeredGridCells.Fixed(1),
         modifier = modifier,
+        state = grid,
         contentPadding = PaddingValues(16.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp),
+        verticalItemSpacing = 16.dp,
     ) {
-        item(span = { GridItemSpan(maxLineSpan) }) { Tiles(stats, wide) }
-        item { PerDayCard(stats) }
-        item { TopChannelsCard(stats.topChannels, onOpenChannel) }
-        item { ByHourCard(stats.byHour) }
-        item { CompletionCard(stats.completion) }
-
-        // What the videos are about.
-        item(span = { GridItemSpan(maxLineSpan) }) {
-            Text("Topics", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp))
+        n.channel?.let { channel ->
+            item(key = "channel", span = StaggeredGridItemSpan.FullLine) {
+                ChannelFilterBar(
+                    channel,
+                    onOpenChannel = channel.url?.let { url -> { onOpenChannel(Channel(url, channel.name)) } },
+                    onClear = { channelKey = null },
+                )
+            }
         }
-        item { TopicsCard(stats.topics, onSearch) }
-        item { CategoriesCard(stats.categories, withCategory = stats.withCategory, videos = stats.videos) }
-
-        item(span = { GridItemSpan(maxLineSpan) }) {
+        item(key = "tiles", span = StaggeredGridItemSpan.FullLine) { Tiles(stats, n.all, n.channel != null, wide) }
+        item(key = "perDay") { PerDayCard(stats) }
+        item(key = "channels") {
+            TopChannelsCard(n.all.topChannels, selected = n.channel?.key) { key ->
+                channelKey = key.takeIf { it != channelKey } // tapping the picked one shows everything again
+            }
+        }
+        item(key = "byHour") { ByHourCard(stats.byHour) }
+        item(key = "completion") { CompletionCard(stats.completion) }
+        item(key = "topics") { TopicsCard(stats.topics, onSearch) }
+        item(key = "categories") { CategoriesCard(stats.categories, withCategory = stats.withCategory, videos = stats.videos) }
+        item(key = "about", span = StaggeredGridItemSpan.FullLine) {
             Text(
-                "From the last ${stats.videos} videos in your history, on this phone only. Watch time " +
-                    "is how far into each video you got, counted on the day you last watched it. Topics " +
-                    "come from titles and the uploaders' tags.",
+                (if (n.channel != null) "From the ${stats.videos} videos by ${n.channel.name} in your history" else "From the last ${stats.videos} videos in your history") +
+                    ", on this phone only. Watch time is how far into each video you got, counted on the day " +
+                    "you last watched it. Topics come from titles and the uploaders' tags.",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
@@ -107,14 +154,30 @@ fun AnalyticsTab(onOpenChannel: (Channel) -> Unit, onSearch: (String) -> Unit, m
     }
 }
 
+/** Above the numbers while one channel's are shown: which, its page, and back to all. */
+@Composable
+private fun ChannelFilterBar(channel: ChannelTime, onOpenChannel: (() -> Unit)?, onClear: () -> Unit) {
+    Surface(shape = RoundedCornerShape(16.dp), color = cardColor(), border = cardBorder()) {
+        Row(Modifier.padding(start = 16.dp, end = 4.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
+            Column(Modifier.weight(1f)) {
+                Text("Only this channel", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text(channel.name, style = MaterialTheme.typography.titleMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+            if (onOpenChannel != null) TextButton(onClick = onOpenChannel) { Text("Open channel") }
+            IconButton(onClick = onClear) { Icon(Icons.Default.Close, contentDescription = "Show all channels") }
+        }
+    }
+}
+
 // --- Tiles -------------------------------------------------------------------------
 
 @Composable
-private fun Tiles(stats: WatchStats, wide: Boolean) {
+private fun Tiles(stats: WatchStats, all: WatchStats, oneChannel: Boolean, wide: Boolean) {
     val tiles = listOf(
         stats.videos.toString() to "videos watched",
         formatWatchTime(stats.watchedMs) to "watch time",
-        stats.channels.toString() to "channels",
+        if (oneChannel) "${(stats.watchedMs * 100 / all.watchedMs.coerceAtLeast(1))}%" to "of all your watch time"
+        else stats.channels.toString() to "channels",
         "${(stats.finishedShare * 100).toInt()}%" to "watched to the end",
     )
     Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -128,7 +191,7 @@ private fun Tiles(stats: WatchStats, wide: Boolean) {
 
 @Composable
 private fun Tile(value: String, label: String, modifier: Modifier) {
-    Surface(modifier, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    Surface(modifier, shape = RoundedCornerShape(16.dp), color = cardColor(), border = cardBorder()) {
         Column(Modifier.padding(16.dp)) {
             Text(value, style = MaterialTheme.typography.headlineSmall)
             Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
@@ -136,11 +199,21 @@ private fun Tile(value: String, label: String, modifier: Modifier) {
     }
 }
 
+/**
+ * The cards' colour: the darkest container colour, so they sit in the page (black in dark
+ * mode, white in light) rather than as grey boxes; a thin outline marks their edges.
+ */
+@Composable
+private fun cardColor(): Color = MaterialTheme.colorScheme.surfaceContainerLowest
+
+@Composable
+private fun cardBorder(): BorderStroke = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.6f))
+
 // --- Cards ---------------------------------------------------------------------------
 
 @Composable
 private fun ChartCard(title: String, caption: String, content: @Composable () -> Unit) {
-    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+    Surface(shape = RoundedCornerShape(16.dp), color = cardColor(), border = cardBorder()) {
         Column(Modifier.fillMaxWidth().padding(16.dp)) {
             Text(title, style = MaterialTheme.typography.titleMedium)
             // The value of the tapped bar, or what the chart shows: always one line, so
@@ -203,17 +276,20 @@ private fun ByHourCard(byHour: List<Long>) {
 
 private fun hourLabel(hour: Int) = "$hour:00"
 
+/** Your top channels (of all of them, even while one is picked); tapping one picks it. */
 @Composable
-private fun TopChannelsCard(channels: List<ChannelTime>, onOpenChannel: (Channel) -> Unit) {
+private fun TopChannelsCard(channels: List<ChannelTime>, selected: String?, onSelect: (String) -> Unit) {
     val most = channels.maxOfOrNull { it.watchedMs }?.coerceAtLeast(1) ?: 1
-    ChartCard("Top channels", "By watch time · tap one to open it") {
+    ChartCard("Top channels", if (selected == null) "By watch time · tap one for its numbers" else "Tap it again for all channels") {
         Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
             channels.forEach { c ->
                 HorizontalBar(
                     label = c.name,
                     value = "${formatWatchTime(c.watchedMs)} · ${c.videos} video${if (c.videos == 1) "" else "s"}",
                     fraction = c.watchedMs.toFloat() / most,
-                    onClick = c.url?.let { url -> { onOpenChannel(Channel(url, c.name)) } },
+                    onClick = { onSelect(c.key) },
+                    clickLabel = "Show ${c.name}'s numbers",
+                    dimmed = selected != null && selected != c.key,
                 )
             }
         }
@@ -223,7 +299,7 @@ private fun TopChannelsCard(channels: List<ChannelTime>, onOpenChannel: (Channel
 @Composable
 private fun TopicsCard(topics: List<TopicTime>, onSearch: (String) -> Unit) {
     val most = topics.maxOfOrNull { it.watchedMs }?.coerceAtLeast(1) ?: 1
-    ChartCard("What you watch about", "By watch time, from titles and tags · tap one to search for it") {
+    ChartCard("Topics", "What you watch about, by watch time · tap one to search for it") {
         if (topics.isEmpty()) {
             Text(
                 "No topic has come up in two videos yet.",
@@ -365,9 +441,12 @@ private fun HorizontalBar(
     value: String,
     fraction: Float,
     onClick: (() -> Unit)? = null,
-    clickLabel: String = "Open the channel",
+    clickLabel: String? = null,
+    /** Faded, beside the picked one. */
+    dimmed: Boolean = false,
 ) {
-    val track = MaterialTheme.colorScheme.surfaceVariant
+    val track = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f)
+    val bar = MaterialTheme.colorScheme.primary.let { if (dimmed) it.copy(alpha = 0.35f) else it }
     Column(
         Modifier
             .fillMaxWidth()
@@ -404,7 +483,7 @@ private fun HorizontalBar(
                     .fillMaxWidth(fraction.coerceIn(0.02f, 1f))
                     .height(8.dp)
                     .clip(RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp))
-                    .background(MaterialTheme.colorScheme.primary),
+                    .background(bar),
             )
         }
     }

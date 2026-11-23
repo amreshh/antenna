@@ -1,5 +1,7 @@
 package com.example.antenna.ui
 
+import com.example.antenna.data.WatchEntry
+import kotlinx.coroutines.flow.distinctUntilChanged
 import android.app.Application
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -31,6 +33,7 @@ import com.example.antenna.data.Recommender
 import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.WatchHistoryStore
+import com.example.antenna.data.WatchLaterStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
@@ -54,16 +57,24 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
     private var uploadsFetchedAt = 0L
     private var uploadsJob: Job? = null
 
-    val items: StateFlow<List<VideoItem>> =
-        combine(history.entries, subscriptions.channels, seed, channelUploads) { h, channels, s, uploads ->
-            Recommender.build(h, channels.map { it.name }.toSet(), s, uploads)
+    /** The recommendations; null until the history has loaded. */
+    val items: StateFlow<List<VideoItem>?> =
+        combine(
+            history.loaded,
+            history.entries.distinctUntilChanged(::sameForRecommendations),
+            subscriptions.channels,
+            seed,
+            channelUploads,
+        ) { loaded, h, channels, s, uploads ->
+            if (!loaded) null else Recommender.build(h, channels.map { it.name }.toSet(), s, uploads)
         }
             .flowOn(Dispatchers.Default)
-            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+            .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
     init {
-        // History loads from disk in the background: wait for it before picking channels.
+        // History loads from disk in the background: wait for all of it before picking channels.
         viewModelScope.launch {
+            history.awaitLoaded()
             history.entries.first { it.isNotEmpty() }
             fetchChannelUploads()
         }
@@ -99,11 +110,20 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
     }
 }
 
+/**
+ * Whether two histories give the same recommendations: the same videos, up next lists and
+ * finished ones. How far into a video you are moves its suggestions' scores only a little,
+ * and rebuilding For you on it (every few seconds while a video plays) reshuffled the list
+ * under your finger.
+ */
+private fun sameForRecommendations(a: Map<String, WatchEntry>, b: Map<String, WatchEntry>): Boolean =
+    a.size == b.size && a.all { (id, e) -> b[id]?.let { it.related === e.related && it.isWatched == e.isWatched } == true }
+
 /** Home tab: recommendations built from YouTube's suggestions for what you've watched. */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ForYouTab(vm: ForYouViewModel, onOpenVideo: (String) -> Unit, modifier: Modifier = Modifier) {
-    val items by vm.items.collectAsStateWithLifecycle()
+    val items = vm.items.collectAsStateWithLifecycle().value ?: return // the history is still loading
 
     PullToRefreshBox(isRefreshing = false, onRefresh = vm::reshuffle, modifier = modifier) {
         if (items.isEmpty()) {
@@ -120,13 +140,44 @@ fun ForYouTab(vm: ForYouViewModel, onOpenVideo: (String) -> Unit, modifier: Modi
     }
 }
 
+/** Watch later tab: the videos you saved, newest first; ✕ takes one off. */
+@Composable
+fun WatchLaterTab(onOpenVideo: (String) -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val store = remember(context) { WatchLaterStore.get(context) }
+    val videos by store.videos.collectAsStateWithLifecycle()
+
+    if (videos.isEmpty()) {
+        EmptyMessage(
+            "Nothing saved yet",
+            "Save videos to watch later from the ⋮ menu on any video, or with Watch later under the one you're watching.",
+            modifier,
+        )
+        return
+    }
+    VideoGrid(modifier) { wide ->
+        videoItems(
+            videos,
+            wide,
+            onClick = { onOpenVideo(it.url) },
+            trailing = { video ->
+                IconButton(onClick = { store.remove(video.url) }) {
+                    Icon(Icons.Default.Close, contentDescription = "Remove from Watch later")
+                }
+            },
+        )
+    }
+}
+
 /** History tab: everything you've opened, newest first. */
 @Composable
 fun HistoryTab(onOpenVideo: (String) -> Unit, modifier: Modifier = Modifier) {
     val context = LocalContext.current
     val store = remember(context) { WatchHistoryStore.get(context) }
     val entries by store.entries.collectAsStateWithLifecycle()
+    val loaded by store.loaded.collectAsStateWithLifecycle()
     val sorted = remember(entries) { entries.values.sortedByDescending { it.lastWatchedAt } }
+    if (!loaded) return // not "No history yet" while it's still loading
 
     if (sorted.isEmpty()) {
         EmptyMessage("No history yet", "Videos you watch will show up here.", modifier)

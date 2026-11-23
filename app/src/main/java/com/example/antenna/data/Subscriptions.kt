@@ -46,6 +46,20 @@ class SubscriptionStore private constructor(context: Context) {
         save(_channels.value.filterNot { it.url == key })
     }
 
+    /** Unsubscribes from all of these (the cleanup). */
+    @Synchronized
+    fun removeAll(urls: Set<String>) {
+        if (urls.isEmpty()) return
+        save(_channels.value.filterNot { it.url in urls })
+    }
+
+    /** Sets avatars, by channel url (for channels imported without one). */
+    @Synchronized
+    fun setAvatars(avatars: Map<String, String>) {
+        if (avatars.isEmpty()) return
+        save(_channels.value.map { c -> avatars[c.url]?.let { c.copy(avatarUrl = it) } ?: c })
+    }
+
     /** Adds channels that aren't already subscribed. Returns how many were new. */
     @Synchronized
     fun addAll(channels: List<Channel>): Int {
@@ -73,23 +87,33 @@ class SubscriptionStore private constructor(context: Context) {
         _channels.value = sorted
     }
 
+    /**
+     * An entry that can't be read is skipped, not the whole list. A list that can't be read at
+     * all is kept aside (under [KEY_UNREADABLE]) before the next change would overwrite it.
+     */
     private fun load(): List<Channel> {
         val raw = sp.getString(KEY, null) ?: return emptyList()
-        return runCatching {
-            val arr = JSONArray(raw)
-            (0 until arr.length()).map { i ->
+        val arr = try {
+            JSONArray(raw)
+        } catch (_: Exception) {
+            sp.edit { putString(KEY_UNREADABLE, raw) }
+            return emptyList()
+        }
+        return (0 until arr.length()).mapNotNull { i ->
+            runCatching {
                 val o = arr.getJSONObject(i)
                 Channel(
                     url = o.getString("url"),
                     name = o.optString("name"),
                     avatarUrl = if (o.isNull("avatar")) null else o.optString("avatar"),
                 )
-            }
-        }.getOrDefault(emptyList())
+            }.getOrNull()
+        }
     }
 
     companion object {
         private const val KEY = "channels"
+        private const val KEY_UNREADABLE = "channels_unreadable"
 
         @Volatile
         private var instance: SubscriptionStore? = null
@@ -116,6 +140,22 @@ fun normalizeChannelUrl(url: String): String? {
         ?.takeIf { CHANNEL_ID.matches(it) }
         ?: Regex("""/channel/(UC[\w-]{22})""").find(url)?.groupValues?.get(1)
     return id?.let { "https://www.youtube.com/channel/$it" }
+}
+
+/**
+ * Subscriptions as Google Takeout's subscriptions.csv writes them, so the file works for
+ * importing anywhere that takes Takeout's (this app included, [parseTakeoutCsv]): a "Channel
+ * Id,Channel Url,Channel Title" header, then one channel per line with an http:// channel
+ * link, a title in quotes only when it has a comma or a quote in it, and \n line ends.
+ */
+fun exportTakeoutCsv(channels: List<Channel>): String = buildString {
+    append("Channel Id,Channel Url,Channel Title\n")
+    channels.forEach { c ->
+        val id = Regex("""/channel/(UC[\w-]{22})""").find(c.url)?.groupValues?.get(1) ?: return@forEach
+        val title = c.name.replace("\r", " ").replace("\n", " ")
+        val field = if (title.contains(',') || title.contains('"')) "\"" + title.replace("\"", "\"\"") + "\"" else title
+        append(id).append(",http://www.youtube.com/channel/").append(id).append(',').append(field).append('\n')
+    }
 }
 
 /**

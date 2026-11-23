@@ -34,6 +34,7 @@ import com.example.antenna.data.Prefs
 import com.example.antenna.sponsorblock.SponsorCategory
 
 private val QUALITIES = listOf(360, 480, 720, 1080, 1440, 2160)
+private val METERED_QUALITIES = listOf(360, 480, 720, 1080, Prefs.SAME_AS_WIFI)
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -42,6 +43,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     val prefs = remember(context) { Prefs(context) }
     var categories by remember { mutableStateOf(prefs.skipCategories) }
     var maxHeight by remember { mutableIntStateOf(prefs.maxHeight) }
+    var maxHeightMetered by remember { mutableIntStateOf(prefs.maxHeightMetered) }
     var hideWatched by remember { mutableStateOf(prefs.hideWatched) }
     var reportSkips by remember { mutableStateOf(prefs.reportSkips) }
 
@@ -102,6 +104,24 @@ fun SettingsScreen(onBack: () -> Unit) {
                     prefs.maxHeight = q
                 }) {
                     RadioButton(selected = maxHeight == q, onClick = null)
+                }
+            }
+
+            item { Header("Max video quality on mobile data") }
+            item {
+                Text(
+                    "Also on other metered networks, like a phone's hotspot. Video is nearly all the data " +
+                        "the app uses: 480p is several times less than 1080p.",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(horizontal = 16.dp),
+                )
+            }
+            items(METERED_QUALITIES) { q ->
+                SettingRow(if (q == Prefs.SAME_AS_WIFI) "Same as on Wi-Fi" else "${q}p", onClick = {
+                    maxHeightMetered = q
+                    prefs.maxHeightMetered = q
+                }) {
+                    RadioButton(selected = maxHeightMetered == q, onClick = null)
                 }
             }
 

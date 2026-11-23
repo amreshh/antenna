@@ -1,5 +1,7 @@
 package com.example.antenna.ui
 
+import androidx.compose.ui.unit.sp
+import androidx.compose.foundation.text.TextAutoSize
 import android.content.Intent
 import android.content.pm.ActivityInfo
 import android.content.res.Configuration
@@ -30,6 +32,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.remember
 import androidx.compose.ui.platform.LocalContext
 import com.example.antenna.data.WatchHistoryStore
+import com.example.antenna.data.WatchLaterStore
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -217,7 +220,7 @@ class MainActivity : ComponentActivity() {
 }
 
 private enum class Tab(val label: String) {
-    ForYou("For you"), Subscriptions("Subscriptions"), History("History"), Analytics("Analytics")
+    ForYou("For you"), Subscriptions("Subscriptions"), WatchLater("Watch later"), History("History"), Analytics("Analytics")
 }
 private enum class Overlay { Settings, Channels }
 
@@ -304,6 +307,12 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
                         Tab.History -> IconButton(onClick = { confirmClearHistory = true }) {
                             Icon(Icons.Default.Delete, contentDescription = "Clear history")
                         }
+                        Tab.WatchLater -> TextButton(onClick = {
+                            val history = WatchHistoryStore.get(context)
+                            val removed = WatchLaterStore.get(context).removeWatched { history.entryFor(it.url)?.isWatched == true }
+                            val message = if (removed == 0) "No watched videos to remove" else "Removed $removed watched video${if (removed == 1) "" else "s"}"
+                            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+                        }) { Text("Remove watched") }
                         Tab.ForYou, Tab.Analytics -> Unit
                     }
                     IconButton(onClick = { overlay = Overlay.Settings }) {
@@ -329,13 +338,23 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
                                     when (t) {
                                         Tab.ForYou -> Icons.Default.Home
                                         Tab.Subscriptions -> Icons.AutoMirrored.Filled.List
+                                        Tab.WatchLater -> BookmarkIcon
                                         Tab.History -> Icons.Default.DateRange
                                         Tab.Analytics -> AnalyticsIcon
                                     },
                                     contentDescription = null,
                                 )
                             },
-                            label = { Text(t.label, maxLines = 1) },
+                            // Five tabs on a phone: a long name ("Subscriptions") shrinks a
+                            // little to fit rather than being cut off.
+                            label = {
+                                Text(
+                                    t.label,
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    autoSize = TextAutoSize.StepBased(minFontSize = 9.sp, maxFontSize = 12.sp, stepSize = 0.5.sp),
+                                )
+                            },
                         )
                     }
                 }
@@ -357,6 +376,7 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
                     onManage = { overlay = Overlay.Channels },
                     modifier = modifier,
                 )
+                Tab.WatchLater -> WatchLaterTab(onOpenVideo, modifier)
                 Tab.History -> HistoryTab(onOpenVideo, modifier)
                 Tab.Analytics -> {
                     val search = viewModel<SearchViewModel>()

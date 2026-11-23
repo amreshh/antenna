@@ -1,5 +1,10 @@
 package com.example.antenna.ui
 
+import androidx.media3.exoplayer.DefaultLoadControl
+import android.net.ConnectivityManager
+import androidx.media3.exoplayer.source.MediaSource
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import android.app.Application
 import android.net.Uri
 import android.widget.Toast
@@ -24,6 +29,7 @@ import com.example.antenna.data.Prefs
 import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.WatchHistoryStore
+import com.example.antenna.data.WatchLaterStore
 import com.example.antenna.data.YouTubeRepository
 import com.example.antenna.data.ageLabel
 import com.example.antenna.data.formatDuration
@@ -64,15 +70,26 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         const val STATE_BACK_STACK = "player_back_stack"
         const val STATE_EXPANDED = "player_expanded"
         const val STATE_FULLSCREEN = "player_fullscreen"
+
+        /** Fresh links per video before giving up and showing the error. */
+        const val MAX_REFRESHES = 3
+
+        /** How far ahead the player buffers: it loads again below the first, and stops at the second. */
+        const val MIN_BUFFER_MS = 15_000
+        const val MAX_BUFFER_MS = 30_000
     }
 
     private val app get() = getApplication<Application>()
     private val prefs = Prefs(app)
     private val subscriptions = SubscriptionStore.get(app)
     private val history = WatchHistoryStore.get(app)
+    private val watchLater = WatchLaterStore.get(app)
     private val sponsorBlock = SponsorBlockClient(App.http)
 
     val subscribedChannels: StateFlow<List<Channel>> get() = subscriptions.channels
+
+    /** Ids of the videos saved to watch later (the player's Watch later button). */
+    val watchLaterIds: StateFlow<Set<String>> get() = watchLater.ids
 
     /** The video that's open, or null when the player is closed. */
     var currentUrl by mutableStateOf<String?>(null)
@@ -108,6 +125,13 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     var playingQuality by mutableStateOf<Int?>(null)
         private set
 
+    /**
+     * Why the video stopped playing, when fetching fresh links didn't help (see
+     * [onPlaybackError]); shown above its details, with Try again. Null while it plays.
+     */
+    var playbackError by mutableStateOf<String?>(null)
+        private set
+
     private var exoPlayer: ExoPlayer? = null
 
     /** Made the first time a video opens, then reused for every video after it. */
@@ -121,6 +145,12 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     private val allowed = mutableSetOf<String>()       // segments the user chose to watch
     private val reported = mutableSetOf<String>()      // skips already reported to SponsorBlock
     private var loadJob: Job? = null
+
+    /** Fetching fresh stream links after a playback error ([refreshStreams]). */
+    private var refreshJob: Job? = null
+
+    /** How many times this video's links were refreshed after an error. */
+    private var refreshes = 0
 
     /** Videos you came from via "Up next", so Back goes to the previous one like YouTube. */
     private val backStack = ArrayDeque<String>()
@@ -144,6 +174,18 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
             /* handleAudioFocus = */ true,
         )
         .setHandleAudioBecomingNoisy(true)
+        // Buffer 15-30 s ahead instead of Media3's 50 s: what's buffered is downloaded for
+        // nothing when you leave a video early (at 1080p, 50 s is some 15-30 MB).
+        .setLoadControl(
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    MIN_BUFFER_MS,
+                    MAX_BUFFER_MS,
+                    DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                    DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+                )
+                .build(),
+        )
         // No wake lock: the screen stays on while a video plays (keepScreenOn) and leaving
         // the app pauses it, so the CPU never needs keeping awake. (Media3 now asks for one
         // by default; the manifest removes its WAKE_LOCK permission.)
@@ -151,11 +193,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         .build()
         .apply {
             addListener(object : Player.Listener {
-                override fun onPlayerError(error: PlaybackException) {
-                    uiState = PlayerUiState.Error(
-                        "Playback failed (${error.errorCodeName}): ${error.cause?.message ?: error.message}",
-                    )
-                }
+                override fun onPlayerError(error: PlaybackException) = onPlaybackError(error)
 
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_ENDED) saveProgress()
@@ -210,6 +248,9 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         currentInfo = null
         qualities = emptyList()
         chosenQuality = null
+        refreshJob?.cancel()
+        refreshes = 0
+        playbackError = null
         segments = emptyList()
         allowed.clear()
         backStack.clear()
@@ -259,15 +300,93 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         val info = currentInfo ?: return
         if (quality == chosenQuality) return
         chosenQuality = quality
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            val (source, _) = pickStreams(info, quality)
+            if (info !== currentInfo) return@launch // another video opened meanwhile
+            val player = player
+            val play = player.playWhenReady
+            player.setMediaSource(source, player.currentPosition)
+            player.prepare()
+            player.playWhenReady = play
+        }
+    }
+
+    /**
+     * The media source for [info] in [chosen] quality (null: Auto, up to the Settings max),
+     * and the qualities it has. Off the main thread: it asks the device's decoders what they
+     * can play, which can take a while the first time.
+     */
+    private suspend fun pickStreams(info: StreamInfo, chosen: Int?): Pair<MediaSource, List<Int>> =
+        withContext(Dispatchers.Default) {
+            StreamPicker.build(info, maxHeight = chosen ?: autoMaxHeight(), http = App.http, preferred = chosen) to
+                StreamPicker.qualities(info)
+        }
+
+    /**
+     * The best quality Auto picks: the Settings max, or on mobile data (or another metered
+     * network) the lower mobile-data one, as the network is when the video opens.
+     */
+    private fun autoMaxHeight(): Int {
+        val metered = app.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true
+        val cap = prefs.maxHeightMetered
+        return if (metered && cap != Prefs.SAME_AS_WIFI) minOf(prefs.maxHeight, cap) else prefs.maxHeight
+    }
+
+    /**
+     * The video stopped with an error. A network or HTTP problem (a refused or expired link,
+     * a server that stayed unavailable through PatientRetryPolicy's retries) gets fresh links
+     * from YouTube, often from another server, and carries on from the same spot, up to
+     * [MAX_REFRESHES] times. YouTube's links also expire after some hours, which this covers
+     * when a long-paused video is played again. Anything else is shown, with Try again.
+     */
+    private fun onPlaybackError(error: PlaybackException) {
+        // Media3's ERROR_CODE_IO_* codes, 2000-2999: network and HTTP problems.
+        val network = error.errorCode in 2000..2999
+        if (network && currentInfo != null && refreshes < MAX_REFRESHES) {
+            refreshes++
+            refreshStreams()
+        } else {
+            playbackError = "Playback failed (${error.errorCodeName}): ${error.cause?.message ?: error.message}"
+        }
+    }
+
+    /** Try again, after an error: the page if it didn't load, otherwise the video with fresh links. */
+    fun retry() {
+        val url = currentUrl ?: return
+        if (currentInfo == null) {
+            show(url, addToBackStack = false)
+            return
+        }
+        refreshes = 0
+        playbackError = null
+        refreshStreams(play = true)
+    }
+
+    /** Fetches the video's stream links again and continues where it stopped. */
+    private fun refreshStreams(play: Boolean? = null) {
+        val url = currentUrl ?: return
         val player = player
         val position = player.currentPosition
-        val play = player.playWhenReady
-        player.setMediaSource(
-            StreamPicker.build(info, maxHeight = quality ?: prefs.maxHeight, http = App.http, preferred = quality),
-            position,
-        )
-        player.prepare()
-        player.playWhenReady = play
+        val playWhenReady = play ?: player.playWhenReady
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            try {
+                val info = YouTubeRepository.streamInfo(url, fresh = true)
+                if (url != currentUrl) return@launch
+                val (source, available) = pickStreams(info, chosenQuality)
+                if (url != currentUrl) return@launch
+                currentInfo = info
+                qualities = available
+                player.setMediaSource(source, position)
+                player.prepare()
+                player.playWhenReady = playWhenReady
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                playbackError = e.readable()
+            }
+        }
     }
 
     fun playPause() {
@@ -299,6 +418,9 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         currentInfo = null
         qualities = emptyList()
         chosenQuality = null // each video starts on Auto
+        refreshJob?.cancel()
+        refreshes = 0
+        playbackError = null
         segments = emptyList()
         allowed.clear()
         saved[STATE_URL] = url
@@ -326,14 +448,16 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                 currentVideo = video
 
                 // Resume where you left off, unless you'd basically finished it.
+                history.awaitLoaded()
                 val previous = history.entryFor(url)
                 val startAt = previous
                     ?.takeIf { !it.isWatched && it.positionMs > RESUME_MIN_MS }
                     ?.positionMs ?: 0L
 
+                val (source, available) = pickStreams(info, chosen = null)
                 currentInfo = info
-                qualities = StreamPicker.qualities(info)
-                player.setMediaSource(StreamPicker.build(info, prefs.maxHeight, App.http), startAt)
+                qualities = available
+                player.setMediaSource(source, startAt)
                 player.prepare()
                 player.playWhenReady = autoplay
                 if (startAt > 0 && autoplay) toast("Resuming from ${formatDuration(startAt / 1000)}")
@@ -437,6 +561,12 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
             subscriptions.subscribe(channel)
             toast("Subscribed to ${channel.name}")
         }
+    }
+
+    /** Saves the video that's open to watch later, or takes it off. */
+    fun toggleWatchLater() {
+        val video = currentVideo ?: return
+        toast(if (watchLater.toggle(video)) "Saved to Watch later" else "Removed from Watch later")
     }
 
     /** Tapping a segment in the list plays it instead of skipping it. */

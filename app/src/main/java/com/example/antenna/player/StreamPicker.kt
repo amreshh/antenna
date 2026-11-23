@@ -50,12 +50,13 @@ object StreamPicker {
         if (info.streamType == StreamType.LIVE_STREAM || info.streamType == StreamType.AUDIO_LIVE_STREAM) {
             require(info.hlsUrl.isNotEmpty()) { "No HLS stream found for this live video" }
             val hlsHttp = DefaultHttpDataSource.Factory().setUserAgent(DESKTOP_USER_AGENT)
-            return HlsMediaSource.Factory(hlsHttp).createMediaSource(
+            return HlsMediaSource.Factory(hlsHttp).setLoadErrorHandlingPolicy(PatientRetryPolicy()).createMediaSource(
                 MediaItem.Builder().setUri(info.hlsUrl).setMediaMetadata(metadata).build(),
             )
         }
 
         val progressive = ProgressiveMediaSource.Factory(YoutubeDataSource.Factory(http))
+            .setLoadErrorHandlingPolicy(PatientRetryPolicy())
         fun source(stream: Stream) = progressive.createMediaSource(
             MediaItem.Builder().setUri(stream.content).setMediaMetadata(metadata).build(),
         )

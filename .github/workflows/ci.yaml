@@ -303,8 +303,9 @@ jobs:
       - name: Android lint
         run: ./gradlew lintDebug
 
+      # Not when lint stopped before writing its report: the failed step says why.
       - name: Lint table
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && hashFiles('app/build/reports/lint-results-debug.sarif') != '' }}
         uses: $/.github/actions/sarif-summary
         with:
           sarif: app/build/reports/lint-results-debug.sarif
@@ -559,7 +560,7 @@ jobs:
           SUMMARY: ${{ runner.temp }}/smoke-summary.md
           SCREENSHOTS: ${{ runner.temp }}/smoke-screenshots
         with:
-          api-level: 35 # the app's targetSdk
+          api-level: 35 # Android 15, which many phones run (the app targets 37, see app/build.gradle.kts)
           target: google_apis
           arch: x86_64
           cores: 4

@@ -70,6 +70,18 @@
   up to the max set in Settings and shows which one is playing, or pick any quality the video
   has, for that video. It carries on from the same spot.
 - **Resume where you left off.**
+- **Keeps playing through YouTube's hiccups:** a video server that's briefly busy (HTTP 503) or
+  a dropped connection is retried for about 20 seconds; a refused or expired link (YouTube's
+  expire after some hours) gets fresh ones and carries on from the same spot. If it still
+  can't play, the error says why, with Try again.
+- **Light on data:** on mobile data the app plays at most 480p (Settings → Max video quality on
+  mobile data). It buffers 15–30 seconds ahead rather than 50, so less is wasted when you leave
+  a video early. Back through Up next reuses the details it already has. The Subscriptions feed
+  isn't loaded again within 15 minutes, and a channel whose feed and page both failed isn't
+  sent to its (much bigger) page again for a day.
+- **Watch later:** save any video from its ⋮ menu, or with Watch later under the one you're
+  watching. The Watch later tab lists them, newest first; Remove watched clears the ones
+  you've finished.
 - Share a YouTube link to Antenna, or open youtube.com / youtu.be video links with it, to play it.
 - **Nothing leaves the phone:** history and subscriptions aren't included in Google Drive
   backups (moving to a new phone with Android's device-to-device transfer still brings them).
@@ -80,13 +92,19 @@
   result's channel avatar to open the channel: its subscriber count, a Subscribe button and
   all its videos.
 - **Subscriptions with no account:** tap Subscribe on any video. The Subscriptions tab shows the
-  newest uploads from all your channels (pull down to refresh). On tablets your channels are
-  listed beside them, by newest activity or A–Z; tap one to see only its videos. Import your existing YouTube
-  subscriptions from Google Takeout ([below](#importing-your-youtube-subscriptions)).
+  newest uploads from all your channels (pull down to refresh). It opens straight away with the
+  feed as it last loaded, while the fresh one loads. On tablets your channels are
+  listed beside them, by newest activity, A–Z or topic; tap one to see only its videos. Import your existing YouTube
+  subscriptions from Google Takeout ([below](#importing-your-youtube-subscriptions)), and export
+  them as the same kind of file.
+- **Subscriptions cleanup** (Subscriptions → ✏️ → ⋮ → Clean up): checks every channel, then
+  lists the ones that don't exist anymore and the ones with no upload in a period you choose (3
+  months to 5 years), each with its reason, before removing anything. Untick a channel to keep
+  it; channels that couldn't be checked are always kept.
 - **Analytics** tab: what your watch history says, worked out on the phone. Videos, watch
   time, channels and how many you finish; watch time per day for the last 30 days; your top
-  channels (tap one to open it); the hours you watch; and how far you get into videos. Tap a
-  bar for its value. **Topics**: what you watch about, from video titles and the uploaders'
+  channels (tap one to see only its numbers); the hours you watch; and how far you get into
+  videos. Tap a bar for its value. **Topics**: what you watch about, from video titles and the uploaders'
   tags (tap one to search for it), and YouTube's categories (saved with each video you watch).
 - **Up next** under every video (Back returns to the previous one), and a **For you** home tab
   built from YouTube's suggestions for what you've watched ([below](#how-for-you-works)).
@@ -145,6 +163,13 @@ Everything runs on the phone with no extra network requests. To tune it, change 
 2. Tick **YouTube and YouTube Music**. Under **All YouTube data included**, keep only **subscriptions**.
 3. Export, download the zip, and unzip it. Inside is `YouTube and YouTube Music/subscriptions/subscriptions.csv`.
 4. Put that file on your phone. In Antenna, go to **Subscriptions → ✏️ → Import** and choose it.
+
+Takeout's file has no channel pictures, so Antenna fetches each imported channel's once, a few
+at a time, after the feed has loaded. **⋮ → Export as CSV** on the same screen saves your
+subscriptions in Takeout's format, for importing elsewhere (or back here).
+
+The Topic order guesses what each channel is about, from what's already on the phone:
+YouTube's category of the videos you watched from it, its name, and its recent titles.
 
 ## When it stops working
 
@@ -267,10 +292,11 @@ art/logo.svg                      the logo; the launcher icon (res/drawable) is 
 ## Ideas for next steps
 
 - Background / picture-in-picture playback (a Media3 `MediaSessionService`)
-- Channel pages (tap a channel → `ChannelInfo` + its Videos tab), and grouping or filtering Shorts out of the feed
-- Caching the feed to disk so it opens instantly, plus a background refresh with new-video notifications (WorkManager)
+- Grouping or filtering Shorts out of the feed
+- A background refresh of the feed with new-video notifications (WorkManager)
 - Subtitles (`info.subtitles` → `MediaItem.SubtitleConfiguration`)
-- A quality picker in the player, and sponsor segments drawn on the seek bar
+- Sponsor segments drawn on the seek bar
+- Targeting Android 17 (API 37) once it's checked on a real Android 17 phone (see `targetSdk` in `app/build.gradle.kts`)
 - "Not interested" on For you items (save a block list of video ids / channels in `Recommender`)
 - DeArrow (crowdsourced titles and thumbnails, from the same team as SponsorBlock)
 

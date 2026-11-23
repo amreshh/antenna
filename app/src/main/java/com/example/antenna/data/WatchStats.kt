@@ -9,6 +9,8 @@ data class TopicTime(val name: String, val watchedMs: Long, val videos: Int)
 
 /** Time spent on one channel, for the Analytics tab's top channels. */
 data class ChannelTime(
+    /** Which channel: [channelKey] of its videos. */
+    val key: String,
     val name: String,
     /** null when its videos were saved without a channel link */
     val url: String?,
@@ -82,11 +84,11 @@ fun watchStats(history: Collection<WatchEntry>, now: Long, zone: ZoneId = ZoneId
             },
         ]++
 
-        val name = e.video.uploader.ifBlank { "Unknown channel" }
-        val key = e.video.channelUrl ?: "name:$name"
+        val key = e.channelKey()
         val old = channels[key]
         channels[key] = ChannelTime(
-            name = name,
+            key = key,
+            name = e.video.uploader.ifBlank { "Unknown channel" },
             url = e.video.channelUrl,
             watchedMs = (old?.watchedMs ?: 0) + watched,
             videos = (old?.videos ?: 0) + 1,
@@ -109,6 +111,13 @@ fun watchStats(history: Collection<WatchEntry>, now: Long, zone: ZoneId = ZoneId
         topics = topTopics(history),
     )
 }
+
+/**
+ * Which channel a watched video is from: its link, or for videos saved without one, its
+ * name. The Analytics tab groups, and filters, by it.
+ */
+fun WatchEntry.channelKey(): String =
+    video.channelUrl ?: "name:${video.uploader.ifBlank { "Unknown channel" }}"
 
 /** Watched time of an entry: how far in it got, never past the end. */
 private fun WatchEntry.watchedMs(): Long = positionMs.coerceIn(0, durationMs.takeIf { it > 0 } ?: positionMs)

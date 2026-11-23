@@ -1,5 +1,13 @@
 package com.example.antenna.ui
 
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
+import androidx.compose.runtime.produceState
+import com.example.antenna.data.ChannelTopics
+import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.compose.material.icons.filled.MoreVert
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -70,6 +78,9 @@ private enum class ChannelSort(val label: String) {
     /** Newest upload first, like YouTube's "New activity". */
     NewActivity("New activity"),
     Alphabetical("A–Z"),
+
+    /** Grouped by what they're about (ChannelTopics), the biggest group first. */
+    Topic("Topic"),
 }
 
 /**
@@ -91,23 +102,45 @@ fun FeedTab(
     // re-read each time the tab is shown, so the Settings toggle applies immediately
     val hideWatched = remember { Prefs(context).hideWatched }
     val history = remember(context) { WatchHistoryStore.get(context) }
-    val watched by history.entries.collectAsStateWithLifecycle()
+    // Only which videos are finished: the history changes every few seconds while one plays.
+    val watched by remember(history) {
+        history.entries.map { entries -> entries.filterValues { it.isWatched }.keys }.distinctUntilChanged()
+    }.collectAsStateWithLifecycle(initialValue = emptySet())
     var sort by rememberSaveable { mutableStateOf(ChannelSort.NewActivity) }
-    /** The channel whose videos are shown (its url), or null for all of them. */
-    var selected by rememberSaveable { mutableStateOf<String?>(null) }
-    // forget a channel that's been unsubscribed from
-    if (selected != null && channels.none { it.url == selected }) selected = null
+    /** The channel picked in the list (its url), or null for all of them. */
+    var picked by rememberSaveable { mutableStateOf<String?>(null) }
+    // One you've unsubscribed from since counts as none.
+    val selected = picked?.takeIf { url -> channels.any { it.url == url } }
 
     val visible = remember(state.items, watched, hideWatched, selected, channels) {
         // The feed doesn't come with avatars, but the subscriptions mostly have them.
         val avatars = channels.associate { it.url to it.avatarUrl }
         state.items
             .filter { selected == null || it.channelUrl == selected }
-            .filterNot { v -> hideWatched && videoIdOf(v.url)?.let { watched[it]?.isWatched } == true }
+            .filterNot { v -> hideWatched && videoIdOf(v.url)?.let { it in watched } == true }
             .map { v -> if (v.channelAvatarUrl != null) v else v.copy(channelAvatarUrl = avatars[v.channelUrl]) }
     }
-    val sortedChannels = remember(channels, state.items, sort) {
+    // The watched videos that have a category, for the Topic order: it changes only when one
+    // is added, not with every position saved while a video plays.
+    val categorized by remember(history) {
+        history.entries.map { entries -> entries.values.filter { it.category != null } }
+            .distinctUntilChanged { a, b -> a.size == b.size && a.mapTo(HashSet()) { it.video.url } == b.mapTo(HashSet()) { it.video.url } }
+    }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val topics by produceState<Map<String, String>?>(null, sort, channels, state.items, categorized) {
+        value = if (sort != ChannelSort.Topic) null
+        else withContext(Dispatchers.Default) { ChannelTopics.of(channels, state.items, categorized) }
+    }
+    /** For the Topic order: (topic, its channels A–Z), the biggest group first and Other last. */
+    val groups = remember(topics, channels) {
+        topics?.let { t ->
+            channels.groupBy { t[it.url] ?: ChannelTopics.OTHER }.entries
+                .sortedWith(compareBy<Map.Entry<String, List<Channel>>> { it.key == ChannelTopics.OTHER }.thenByDescending { it.value.size }.thenBy { it.key })
+                .map { (topic, list) -> topic to list.sortedBy { it.name.lowercase() } }
+        }
+    }
+    val sortedChannels = remember(channels, state.items, sort, groups) {
         when (sort) {
+            ChannelSort.Topic -> groups?.flatMap { it.second } ?: channels.sortedBy { it.name.lowercase() }
             ChannelSort.Alphabetical -> channels.sortedBy { it.name.lowercase() }
             ChannelSort.NewActivity -> {
                 val newest = HashMap<String, Long>()
@@ -144,10 +177,11 @@ fun FeedTab(
         Row(modifier) {
             ChannelList(
                 sortedChannels,
+                groups = groups.takeIf { sort == ChannelSort.Topic },
                 sort = sort,
                 onSort = { sort = it },
                 selected = selected,
-                onSelect = { selected = it },
+                onSelect = { picked = it },
                 modifier = Modifier.width(280.dp).fillMaxHeight(),
             )
             FeedGrid(state, visible, vm::refresh, onOpenVideo, onOpenChannel, Modifier.weight(1f).fillMaxHeight())
@@ -161,6 +195,8 @@ fun FeedTab(
 @Composable
 private fun ChannelList(
     channels: List<Channel>,
+    /** The Topic order's groups: shown under their topic's heading. */
+    groups: List<Pair<String, List<Channel>>>?,
     sort: ChannelSort,
     onSort: (ChannelSort) -> Unit,
     selected: String?,
@@ -201,14 +237,28 @@ private fun ChannelList(
                     }
                 }
             }
-            items(channels, key = { it.url }) { channel ->
-                ChannelEntry(
-                    name = channel.name,
-                    selected = selected == channel.url,
-                    onClick = { onSelect(channel.url) },
-                ) {
-                    ChannelAvatar(channel.avatarUrl, Modifier.size(32.dp))
+            @Composable
+            fun Entry(channel: Channel) = ChannelEntry(
+                name = channel.name,
+                selected = selected == channel.url,
+                onClick = { onSelect(channel.url) },
+            ) {
+                ChannelAvatar(channel.avatarUrl, Modifier.size(32.dp))
+            }
+            if (groups != null) {
+                groups.forEach { (topic, list) ->
+                    item(key = "topic:$topic") {
+                        Text(
+                            topic,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 4.dp),
+                        )
+                    }
+                    items(list, key = { it.url }) { Entry(it) }
                 }
+            } else {
+                items(channels, key = { it.url }) { Entry(it) }
             }
         }
     }
@@ -284,12 +334,24 @@ private fun FeedGrid(
     }
 }
 
-/** List of subscribed channels, with unsubscribe and Google Takeout import. */
+/**
+ * List of subscribed channels, with unsubscribe, Google Takeout import and export, and the
+ * cleanup of channels that are gone or haven't uploaded for a while.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChannelsScreen(vm: FeedViewModel, onBack: () -> Unit) {
     val channels by vm.channels.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val cleanup = viewModel<CleanupViewModel>()
+    CleanupDialogs(cleanup)
+
+    val exporter = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+        if (uri == null) return@rememberLauncherForActivityResult
+        val app = context.applicationContext
+        vm.exportTakeout(uri) { message -> Toast.makeText(app, message, Toast.LENGTH_LONG).show() }
+    }
+    var menu by remember { mutableStateOf(false) }
 
     val importer = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         if (uri == null) return@rememberLauncherForActivityResult
@@ -311,6 +373,27 @@ fun ChannelsScreen(vm: FeedViewModel, onBack: () -> Unit) {
                     TextButton(onClick = {
                         importer.launch(arrayOf("text/*", "application/csv", "application/octet-stream"))
                     }) { Text("Import") }
+                    Box {
+                        IconButton(onClick = { menu = true }) { Icon(Icons.Default.MoreVert, contentDescription = "More options") }
+                        DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                            DropdownMenuItem(
+                                text = { Text("Export as CSV") },
+                                enabled = channels.isNotEmpty(),
+                                onClick = {
+                                    menu = false
+                                    exporter.launch("subscriptions.csv")
+                                },
+                            )
+                            DropdownMenuItem(
+                                text = { Text("Clean up…") },
+                                enabled = channels.isNotEmpty(),
+                                onClick = {
+                                    menu = false
+                                    cleanup.start()
+                                },
+                            )
+                        }
+                    }
                 },
             )
         },

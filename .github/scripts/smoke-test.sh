@@ -138,9 +138,22 @@ player() {
     xml=$(ui)
     title=$(tagged player_title <<< "$xml")
     error=$(tagged player_error <<< "$xml")
-    if [ -n "$title" ]; then
+    # Loaded. A playback error shows above the details (the title stays), so give the
+    # video a few seconds to start, and fail if an error turns up meanwhile.
+    if [ -n "$title" ] && [ -z "$error" ]; then
+      for _ in 1 2 3 4; do
+        sleep 2
+        error=$(tagged player_error <<< "$(ui)")
+        [ -z "$error" ] || break
+      done
+    fi
+    if [ -n "$title" ] && [ -z "$error" ]; then
+      if crashed || ! running; then
+        note="the app crashed"
+        return 1
+      fi
       screenshot player
-      note="it loaded “$title”"
+      note="it loaded and plays “$title”"
       return 0
     fi
     if [ -n "$error" ]; then
