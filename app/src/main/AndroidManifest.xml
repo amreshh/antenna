@@ -3,6 +3,12 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!--
+    Media3 asks for this for ExoPlayer's wake mode (keeping the CPU awake while playing with
+    the screen off). The app never turns that on: the screen stays on while a video plays,
+    and leaving the app pauses it. (.github/scripts/apk-security.py checks the permissions.)
+    -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" tools:node="remove" />
 
     <!--
     Watch history and subscriptions stay on the phone, not in a Google Drive backup:
@@ -20,26 +26,22 @@
         android:theme="@style/Theme.Antenna"
         android:supportsRtl="true">
 
+        <!--
+        The app's only screen; the player is drawn over the tabs. It also opens YouTube video
+        links shared from or opened in other apps. singleTask: a link plays in the app that's
+        already open (Back returns to the video that was playing) instead of starting a second
+        copy with a second player. The config changes are handled by the screen itself, so
+        rotating, resizing or switching dark mode doesn't interrupt the video.
+        -->
         <activity
             android:name=".ui.MainActivity"
-            android:exported="true">
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-        </activity>
-
-        <!--
-        Also opens YouTube video links shared from or opened in other apps. singleTop: a link
-        shared while the player is open plays there (Back returns to the previous video)
-        instead of stacking a second player. The config changes are handled by the player
-        itself, so rotating, resizing or switching dark mode doesn't restart the video.
-        -->
-        <activity
-            android:name=".ui.PlayerActivity"
-            android:exported="true"
-            android:launchMode="singleTop"
-            android:configChanges="orientation|screenSize|screenLayout|smallestScreenSize|keyboardHidden|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />

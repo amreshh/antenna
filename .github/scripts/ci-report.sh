@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # The pull request comment: what merging does, each check's result, and the
 # tables the jobs left behind (*-summary.md in the current folder: tests, apk,
-# smoke, lint, zizmor). The ci workflow's report job runs it and posts the
+# apk-security, smoke, lint, zizmor, deps). The ci workflow's report job runs it and posts the
 # result, updating its earlier comment (found by the first line, a marker).
 #
 #   ci-report.sh > comment.md
 #
 # Environment: SHA (the pull request's head commit), BASE (its base branch),
 # VERSION (what merging releases), the jobs' results (TEST, LINT, WORKFLOWS,
-# BUILD, SMOKE: success, failure, cancelled or skipped), APK_URL (the APK
+# DEPS, BUILD, SMOKE: success, failure, cancelled or skipped), APK_URL (the APK
 # artifact), RUN_URL, PR (its number), and GITHUB_SERVER_URL and
 # GITHUB_REPOSITORY as GitHub Actions sets them.
 set -euo pipefail
@@ -41,7 +41,7 @@ section() { # <file> [open]
 open_unless_passed() { [ "$1" = success ] || echo open; }
 
 all_passed=true
-for result in "$TEST" "$LINT" "$WORKFLOWS" "$BUILD" "$SMOKE"; do
+for result in "$TEST" "$LINT" "$WORKFLOWS" "$DEPS" "$BUILD" "$SMOKE"; do
   [ "$result" = success ] || all_passed=false
 done
 
@@ -61,12 +61,15 @@ echo "| --- | --- |"
 echo "| Unit tests | $(icon "$TEST") |"
 echo "| Android lint | $(icon "$LINT") |"
 echo "| Workflows: actionlint, zizmor | $(icon "$WORKFLOWS") |"
-echo "| Release APK, built with R8 | $(icon "$BUILD") |"
-echo "| Smoke test on an emulator | $(icon "$SMOKE") |"
+echo "| Dependency vulnerabilities (osv.dev) | $(icon "$DEPS") |"
+echo "| Release APK, built with R8, security checks | $(icon "$BUILD") |"
+echo "| Smoke test and performance on an emulator | $(icon "$SMOKE") |"
 echo
 
 section apk-summary.md open
+section apk-security-summary.md "$(open_unless_passed "$BUILD")"
 section smoke-summary.md open
+section deps-summary.md "$(open_unless_passed "$DEPS")"
 section tests-summary.md "$(open_unless_passed "$TEST")"
 section lint-summary.md "$(open_unless_passed "$LINT")"
 section zizmor-summary.md "$(open_unless_passed "$WORKFLOWS")"

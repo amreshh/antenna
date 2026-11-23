@@ -30,11 +30,17 @@ import org.schabi.newpipe.extractor.stream.VideoStream
  *
  * YouTube serves its best qualities as separate video-only and audio-only files,
  * so we pick one of each and play them together with a MergingMediaSource.
+ *
+ * Quality means the shorter side, like YouTube's labels: a vertical 1080×1920 video is 1080p.
  */
 @OptIn(UnstableApi::class)
 object StreamPicker {
 
-    fun build(info: StreamInfo, maxHeight: Int, http: OkHttpClient): MediaSource {
+    /**
+     * The video in the best quality up to [maxHeight] (e.g. 1080), or in exactly [preferred]
+     * when it has that quality and the device can decode it (the player's quality menu).
+     */
+    fun build(info: StreamInfo, maxHeight: Int, http: OkHttpClient, preferred: Int? = null): MediaSource {
         val metadata = MediaMetadata.Builder()
             .setTitle(info.name)
             .setArtist(info.uploaderName)
@@ -56,15 +62,16 @@ object StreamPicker {
 
         // Only codecs this device can decode (a stream it can't would play as audio only),
         // and hardware decoding first: 1440p in VP9 decoded in software stutters where
-        // 1080p in H.264 plays smoothly.
+        // 1080p in H.264 plays smoothly. A quality picked in the menu comes before all that.
         val decoders = HashMap<String?, Decoding>()
         val video = info.videoOnlyStreams
-            .filter { it.isPlayable() && it.height in 1..maxHeight }
+            .filter { it.isPlayable() && it.shortSide in 1..maxOf(maxHeight, preferred ?: 0) }
             .map { it to decoders.getOrPut(it.codec) { decodingOf(it.codec) } }
             .filter { (_, decoding) -> decoding != Decoding.NONE }
             .sortedWith(
-                compareBy<Pair<VideoStream, Decoding>> { (_, decoding) -> decoding.ordinal }
-                    .thenByDescending { (stream, _) -> stream.height }
+                compareBy<Pair<VideoStream, Decoding>> { (stream, _) -> if (stream.shortSide == preferred) 0 else 1 }
+                    .thenBy { (_, decoding) -> decoding.ordinal }
+                    .thenByDescending { (stream, _) -> stream.shortSide }
                     // at equal height prefer H.264 (hardware decoding on nearly every phone)
                     .thenBy { (stream, _) -> if (stream.codec?.startsWith("avc") == true) 0 else 1 }
                     .thenByDescending { (stream, _) -> stream.fps },
@@ -90,10 +97,27 @@ object StreamPicker {
         // Fallback: a muxed (video+audio in one file) stream, usually 360p
         val muxed = info.videoStreams
             .filter { it.isPlayable() }
-            .maxByOrNull { it.height }
+            .maxByOrNull { it.shortSide }
             ?: error("No playable stream found")
         return source(muxed)
     }
+
+    /**
+     * The qualities the quality menu offers, best first: those this device can decode. Empty
+     * for live streams, whose quality adapts by itself.
+     */
+    fun qualities(info: StreamInfo): List<Int> {
+        if (info.streamType == StreamType.LIVE_STREAM || info.streamType == StreamType.AUDIO_LIVE_STREAM) return emptyList()
+        val decoders = HashMap<String?, Decoding>()
+        val separate = info.videoOnlyStreams
+            .filter { it.isPlayable() && decoders.getOrPut(it.codec) { decodingOf(it.codec) } != Decoding.NONE }
+        val streams = separate.ifEmpty { info.videoStreams.filter { it.isPlayable() } }
+        return streams.map { it.shortSide }.filter { it > 0 }.distinct().sortedDescending()
+    }
+
+    /** The shorter side: 1080 for both 1920×1080 and a vertical 1080×1920. */
+    val VideoStream.shortSide: Int
+        get() = if (width > 0 && height > 0) minOf(width, height) else height
 
     private fun Stream.isPlayable() =
         isUrl && deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP && content.isNotEmpty()

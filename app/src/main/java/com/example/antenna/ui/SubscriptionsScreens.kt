@@ -3,13 +3,21 @@ package com.example.antenna.ui
 import android.widget.Toast
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -17,7 +25,11 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.List
+import androidx.compose.material.icons.filled.ArrowDropDown
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -33,7 +45,12 @@ import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -41,17 +58,30 @@ import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
+import com.example.antenna.data.Channel
 import com.example.antenna.data.Prefs
+import com.example.antenna.data.VideoItem
 import com.example.antenna.data.WatchHistoryStore
 import com.example.antenna.data.videoIdOf
 
-/** The Subscriptions tab: newest uploads from every channel you follow. */
+/** How the channel list next to the feed is ordered. */
+private enum class ChannelSort(val label: String) {
+    /** Newest upload first, like YouTube's "New activity". */
+    NewActivity("New activity"),
+    Alphabetical("A–Z"),
+}
+
+/**
+ * The Subscriptions tab: newest uploads from every channel you follow. On big screens, the
+ * channels are listed on the left (newest activity or A–Z); tapping one shows only its videos.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FeedTab(
     vm: FeedViewModel,
     onOpenVideo: (String) -> Unit,
+    onOpenChannel: (Channel) -> Unit,
     onManage: () -> Unit,
     modifier: Modifier = Modifier,
 ) {
@@ -62,9 +92,32 @@ fun FeedTab(
     val hideWatched = remember { Prefs(context).hideWatched }
     val history = remember(context) { WatchHistoryStore.get(context) }
     val watched by history.entries.collectAsStateWithLifecycle()
-    val visible = remember(state.items, watched, hideWatched) {
-        if (!hideWatched) state.items
-        else state.items.filterNot { v -> videoIdOf(v.url)?.let { watched[it]?.isWatched } == true }
+    var sort by rememberSaveable { mutableStateOf(ChannelSort.NewActivity) }
+    /** The channel whose videos are shown (its url), or null for all of them. */
+    var selected by rememberSaveable { mutableStateOf<String?>(null) }
+    // forget a channel that's been unsubscribed from
+    if (selected != null && channels.none { it.url == selected }) selected = null
+
+    val visible = remember(state.items, watched, hideWatched, selected, channels) {
+        // The feed doesn't come with avatars, but the subscriptions mostly have them.
+        val avatars = channels.associate { it.url to it.avatarUrl }
+        state.items
+            .filter { selected == null || it.channelUrl == selected }
+            .filterNot { v -> hideWatched && videoIdOf(v.url)?.let { watched[it]?.isWatched } == true }
+            .map { v -> if (v.channelAvatarUrl != null) v else v.copy(channelAvatarUrl = avatars[v.channelUrl]) }
+    }
+    val sortedChannels = remember(channels, state.items, sort) {
+        when (sort) {
+            ChannelSort.Alphabetical -> channels.sortedBy { it.name.lowercase() }
+            ChannelSort.NewActivity -> {
+                val newest = HashMap<String, Long>()
+                state.items.forEach { v ->
+                    val url = v.channelUrl ?: return@forEach
+                    if (v.uploadedAtMs > (newest[url] ?: 0L)) newest[url] = v.uploadedAtMs
+                }
+                channels.sortedWith(compareByDescending<Channel> { newest[it.url] ?: 0L }.thenBy { it.name.lowercase() })
+            }
+        }
     }
 
     if (channels.isEmpty()) {
@@ -87,7 +140,114 @@ fun FeedTab(
         return
     }
 
-    PullToRefreshBox(isRefreshing = state.refreshing, onRefresh = vm::refresh, modifier = modifier) {
+    if (isWideWindow()) {
+        Row(modifier) {
+            ChannelList(
+                sortedChannels,
+                sort = sort,
+                onSort = { sort = it },
+                selected = selected,
+                onSelect = { selected = it },
+                modifier = Modifier.width(280.dp).fillMaxHeight(),
+            )
+            FeedGrid(state, visible, vm::refresh, onOpenVideo, onOpenChannel, Modifier.weight(1f).fillMaxHeight())
+        }
+    } else {
+        FeedGrid(state, visible, vm::refresh, onOpenVideo, onOpenChannel, modifier)
+    }
+}
+
+/** The channels you follow, beside the feed: tap one to see only its videos. */
+@Composable
+private fun ChannelList(
+    channels: List<Channel>,
+    sort: ChannelSort,
+    onSort: (ChannelSort) -> Unit,
+    selected: String?,
+    onSelect: (String?) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
+        var menu by remember { mutableStateOf(false) }
+        Box(Modifier.padding(start = 8.dp, top = 4.dp)) {
+            TextButton(onClick = { menu = true }) {
+                Text(sort.label, style = MaterialTheme.typography.titleSmall)
+                Icon(Icons.Default.ArrowDropDown, contentDescription = "Sort channels")
+            }
+            DropdownMenu(expanded = menu, onDismissRequest = { menu = false }) {
+                ChannelSort.entries.forEach { option ->
+                    DropdownMenuItem(
+                        text = { Text(option.label) },
+                        onClick = {
+                            onSort(option)
+                            menu = false
+                        },
+                    )
+                }
+            }
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(horizontal = 12.dp, vertical = 4.dp)) {
+            item(key = "all") {
+                ChannelEntry(
+                    name = "All channels",
+                    selected = selected == null,
+                    onClick = { onSelect(null) },
+                ) {
+                    Box(
+                        Modifier.size(32.dp).clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Icon(Icons.AutoMirrored.Filled.List, contentDescription = null, modifier = Modifier.size(20.dp))
+                    }
+                }
+            }
+            items(channels, key = { it.url }) { channel ->
+                ChannelEntry(
+                    name = channel.name,
+                    selected = selected == channel.url,
+                    onClick = { onSelect(channel.url) },
+                ) {
+                    ChannelAvatar(channel.avatarUrl, Modifier.size(32.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ChannelEntry(name: String, selected: Boolean, onClick: () -> Unit, icon: @Composable () -> Unit) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(28.dp))
+            .background(if (selected) MaterialTheme.colorScheme.secondaryContainer else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(horizontal = 12.dp, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        icon()
+        Text(
+            name,
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** The feed's videos, newest first, with the refresh progress and any errors above them. */
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun FeedGrid(
+    state: FeedUiState,
+    visible: List<VideoItem>,
+    onRefresh: () -> Unit,
+    onOpenVideo: (String) -> Unit,
+    onOpenChannel: (Channel) -> Unit,
+    modifier: Modifier,
+) {
+    PullToRefreshBox(isRefreshing = state.refreshing, onRefresh = onRefresh, modifier = modifier) {
         VideoGrid(Modifier.fillMaxSize()) { wide ->
             state.progress?.let { (done, total) ->
                 fullWidthItem {
@@ -119,7 +279,7 @@ fun FeedTab(
                     )
                 }
             }
-            videoItems(visible, wide, onClick = { onOpenVideo(it.url) })
+            videoItems(visible, wide, onClick = { onOpenVideo(it.url) }, onChannelClick = onOpenChannel)
         }
     }
 }
@@ -154,6 +314,8 @@ fun ChannelsScreen(vm: FeedViewModel, onBack: () -> Unit) {
                 },
             )
         },
+        // room for the mini player while a video plays
+        bottomBar = { MiniPlayerSlot(Modifier.navigationBarsPadding()) },
     ) { padding ->
         LazyColumn(Modifier.padding(padding).fillMaxSize()) {
             item {

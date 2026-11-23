@@ -1,0 +1,422 @@
+package com.example.antenna.ui
+
+import androidx.compose.foundation.Canvas
+import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
+import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.materialIcon
+import androidx.compose.material.icons.materialPath
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.RoundRect
+import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.drawscope.DrawScope
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.example.antenna.data.Channel
+import com.example.antenna.data.ChannelTime
+import com.example.antenna.data.TopicTime
+import com.example.antenna.data.WatchHistoryStore
+import com.example.antenna.data.WatchStats
+import com.example.antenna.data.formatWatchTime
+import com.example.antenna.data.watchStats
+import java.time.format.DateTimeFormatter
+import java.time.format.FormatStyle
+
+/**
+ * The Analytics tab: what your watch history says about your watching, worked out on the
+ * phone (data/WatchStats.kt). Tiles for the headline numbers, then one chart per question,
+ * each a single measure in one colour. Tap a bar for its value.
+ */
+@Composable
+fun AnalyticsTab(onOpenChannel: (Channel) -> Unit, onSearch: (String) -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val store = remember(context) { WatchHistoryStore.get(context) }
+    val entries by store.entries.collectAsStateWithLifecycle()
+    val stats = remember(entries) { watchStats(entries.values, System.currentTimeMillis()) }
+
+    if (stats.videos == 0) {
+        EmptyMessage("Nothing to show yet", "Watch a few videos and what you watch, and when, shows up here.", modifier)
+        return
+    }
+
+    val wide = isWideWindow()
+    LazyVerticalGrid(
+        columns = if (wide) GridCells.Adaptive(minSize = 420.dp) else GridCells.Fixed(1),
+        modifier = modifier,
+        contentPadding = PaddingValues(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(16.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+    ) {
+        item(span = { GridItemSpan(maxLineSpan) }) { Tiles(stats, wide) }
+        item { PerDayCard(stats) }
+        item { TopChannelsCard(stats.topChannels, onOpenChannel) }
+        item { ByHourCard(stats.byHour) }
+        item { CompletionCard(stats.completion) }
+
+        // What the videos are about.
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            Text("Topics", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(top = 8.dp))
+        }
+        item { TopicsCard(stats.topics, onSearch) }
+        item { CategoriesCard(stats.categories, withCategory = stats.withCategory, videos = stats.videos) }
+
+        item(span = { GridItemSpan(maxLineSpan) }) {
+            Text(
+                "From the last ${stats.videos} videos in your history, on this phone only. Watch time " +
+                    "is how far into each video you got, counted on the day you last watched it. Topics " +
+                    "come from titles and the uploaders' tags.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
+// --- Tiles -------------------------------------------------------------------------
+
+@Composable
+private fun Tiles(stats: WatchStats, wide: Boolean) {
+    val tiles = listOf(
+        stats.videos.toString() to "videos watched",
+        formatWatchTime(stats.watchedMs) to "watch time",
+        stats.channels.toString() to "channels",
+        "${(stats.finishedShare * 100).toInt()}%" to "watched to the end",
+    )
+    Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        tiles.chunked(if (wide) 4 else 2).forEach { row ->
+            Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                row.forEach { (value, label) -> Tile(value, label, Modifier.weight(1f)) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Tile(value: String, label: String, modifier: Modifier) {
+    Surface(modifier, shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        Column(Modifier.padding(16.dp)) {
+            Text(value, style = MaterialTheme.typography.headlineSmall)
+            Text(label, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+// --- Cards ---------------------------------------------------------------------------
+
+@Composable
+private fun ChartCard(title: String, caption: String, content: @Composable () -> Unit) {
+    Surface(shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
+        Column(Modifier.fillMaxWidth().padding(16.dp)) {
+            Text(title, style = MaterialTheme.typography.titleMedium)
+            // The value of the tapped bar, or what the chart shows: always one line, so
+            // tapping doesn't move the chart.
+            Text(
+                caption,
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp, bottom = 12.dp),
+            )
+            content()
+        }
+    }
+}
+
+@Composable
+private fun PerDayCard(stats: WatchStats) {
+    var selected by rememberSaveable { mutableStateOf<Int?>(null) }
+    val dayFormat = remember { DateTimeFormatter.ofPattern("MMM d") }
+    val fullFormat = remember { DateTimeFormatter.ofLocalizedDate(FormatStyle.MEDIUM) }
+    val days = stats.perDay
+    val caption = selected?.let { i ->
+        "${stats.firstDay.plusDays(i.toLong()).format(fullFormat)}: ${formatWatchTime(days[i])}"
+    } ?: "Total ${formatWatchTime(days.sum())} · busiest day ${formatWatchTime(days.max())}"
+    ChartCard("Watch time, last 30 days", caption) {
+        BarChart(
+            values = days,
+            selected = selected,
+            onSelect = { selected = it.takeIf { i -> i != selected } },
+            description = "Watch time per day for the last 30 days, ${formatWatchTime(days.sum())} in total",
+        )
+        AxisLabels(
+            listOf(
+                stats.firstDay.format(dayFormat),
+                stats.firstDay.plusDays(15).format(dayFormat),
+                "Today",
+            ),
+        )
+    }
+}
+
+@Composable
+private fun ByHourCard(byHour: List<Long>) {
+    var selected by rememberSaveable { mutableStateOf<Int?>(null) }
+    val busiest = byHour.indices.maxBy { byHour[it] }
+    val caption = selected?.let { h -> "${hourLabel(h)}–${hourLabel((h + 1) % 24)}: ${formatWatchTime(byHour[h])}" }
+        ?: "Most often around ${hourLabel(busiest)}"
+    ChartCard("When you watch", caption) {
+        BarChart(
+            values = byHour,
+            selected = selected,
+            onSelect = { selected = it.takeIf { i -> i != selected } },
+            description = "Watch time by hour of the day, most around ${hourLabel(busiest)}",
+        )
+        AxisLabels(listOf("0:00", "6:00", "12:00", "18:00", "24:00"))
+    }
+}
+
+private fun hourLabel(hour: Int) = "$hour:00"
+
+@Composable
+private fun TopChannelsCard(channels: List<ChannelTime>, onOpenChannel: (Channel) -> Unit) {
+    val most = channels.maxOfOrNull { it.watchedMs }?.coerceAtLeast(1) ?: 1
+    ChartCard("Top channels", "By watch time · tap one to open it") {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            channels.forEach { c ->
+                HorizontalBar(
+                    label = c.name,
+                    value = "${formatWatchTime(c.watchedMs)} · ${c.videos} video${if (c.videos == 1) "" else "s"}",
+                    fraction = c.watchedMs.toFloat() / most,
+                    onClick = c.url?.let { url -> { onOpenChannel(Channel(url, c.name)) } },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun TopicsCard(topics: List<TopicTime>, onSearch: (String) -> Unit) {
+    val most = topics.maxOfOrNull { it.watchedMs }?.coerceAtLeast(1) ?: 1
+    ChartCard("What you watch about", "By watch time, from titles and tags · tap one to search for it") {
+        if (topics.isEmpty()) {
+            Text(
+                "No topic has come up in two videos yet.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            topics.forEach { t ->
+                HorizontalBar(
+                    label = t.name,
+                    value = "${formatWatchTime(t.watchedMs)} · ${t.videos} videos",
+                    fraction = t.watchedMs.toFloat() / most,
+                    onClick = { onSearch(t.name) },
+                    clickLabel = "Search for ${t.name}",
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CategoriesCard(categories: List<TopicTime>, withCategory: Int, videos: Int) {
+    val most = categories.maxOfOrNull { it.watchedMs }?.coerceAtLeast(1) ?: 1
+    val caption = if (withCategory == videos) "YouTube's categories, by watch time"
+    else "YouTube's categories, by watch time · $withCategory of $videos videos have one"
+    ChartCard("Categories", caption) {
+        if (categories.isEmpty()) {
+            Text(
+                "Categories are saved for videos you watch from now on.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            categories.forEach { c ->
+                HorizontalBar(
+                    label = c.name,
+                    value = "${formatWatchTime(c.watchedMs)} · ${c.videos} video${if (c.videos == 1) "" else "s"}",
+                    fraction = c.watchedMs.toFloat() / most,
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun CompletionCard(completion: List<Int>) {
+    val total = completion.sum().coerceAtLeast(1)
+    val most = completion.max().coerceAtLeast(1)
+    ChartCard("How much you finish", "Videos by how far you got into them") {
+        Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            completion.forEachIndexed { i, n ->
+                HorizontalBar(
+                    label = WatchStats.COMPLETION_LABELS[i],
+                    value = "$n · ${n * 100 / total}%",
+                    fraction = n.toFloat() / most,
+                )
+            }
+        }
+    }
+}
+
+// --- Marks -----------------------------------------------------------------------------
+
+/**
+ * Vertical bars of one measure: thin, 2 dp apart, rounded only at the top (the data end),
+ * standing on a faint baseline. Tapping a bar selects it (the others dim) and the card's
+ * caption shows its value.
+ */
+@Composable
+private fun BarChart(
+    values: List<Long>,
+    selected: Int?,
+    onSelect: (Int) -> Unit,
+    description: String,
+    height: Dp = 140.dp,
+) {
+    val bar = MaterialTheme.colorScheme.primary
+    val dim = bar.copy(alpha = 0.35f)
+    val baseline = MaterialTheme.colorScheme.outlineVariant
+    val max = values.maxOrNull()?.coerceAtLeast(1) ?: 1
+    Canvas(
+        Modifier
+            .fillMaxWidth()
+            .height(height)
+            .semantics { contentDescription = description }
+            .pointerInput(values.size) {
+                detectTapGestures { offset ->
+                    val i = (offset.x / (size.width.toFloat() / values.size)).toInt()
+                    if (i in values.indices) onSelect(i)
+                }
+            },
+    ) {
+        val gap = 2.dp.toPx()
+        val slot = size.width / values.size
+        val radius = 4.dp.toPx().coerceAtMost((slot - gap) / 2)
+        values.forEachIndexed { i, v ->
+            if (v <= 0) return@forEachIndexed
+            val h = (size.height * v / max).coerceAtLeast(2.dp.toPx())
+            val color = if (selected == null || selected == i) bar else dim
+            topRoundedBar(Offset(i * slot + gap / 2, size.height - h), Size(slot - gap, h), radius, color)
+        }
+        drawLine(baseline, Offset(0f, size.height), Offset(size.width, size.height), strokeWidth = 1.dp.toPx())
+    }
+}
+
+private fun DrawScope.topRoundedBar(topLeft: Offset, size: Size, radius: Float, color: Color) {
+    val r = CornerRadius(radius, radius)
+    val path = Path().apply {
+        addRoundRect(
+            RoundRect(
+                left = topLeft.x, top = topLeft.y, right = topLeft.x + size.width, bottom = topLeft.y + size.height,
+                topLeftCornerRadius = r, topRightCornerRadius = r,
+                bottomLeftCornerRadius = CornerRadius.Zero, bottomRightCornerRadius = CornerRadius.Zero,
+            ),
+        )
+    }
+    drawPath(path, color)
+}
+
+/** Labels spread along a chart's bottom edge, first at the left and last at the right. */
+@Composable
+private fun AxisLabels(labels: List<String>) {
+    Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.SpaceBetween) {
+        labels.forEach {
+            Text(it, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+        }
+    }
+}
+
+/**
+ * A labelled horizontal bar: the name and its value above (in text colours), a thin bar
+ * below, rounded at its end, on a faint track for the whole width.
+ */
+@Composable
+private fun HorizontalBar(
+    label: String,
+    value: String,
+    fraction: Float,
+    onClick: (() -> Unit)? = null,
+    clickLabel: String = "Open the channel",
+) {
+    val track = MaterialTheme.colorScheme.surfaceVariant
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(8.dp))
+            .then(if (onClick != null) Modifier.clickable(onClickLabel = clickLabel, onClick = onClick) else Modifier)
+            .padding(vertical = 2.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                label,
+                style = MaterialTheme.typography.bodyMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
+            )
+            Text(
+                "  $value",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
+        Box(
+            Modifier
+                .padding(top = 4.dp)
+                .fillMaxWidth()
+                .height(8.dp)
+                .clip(RoundedCornerShape(4.dp))
+                .background(track),
+        ) {
+            // Nothing for zero; anything else at least visible.
+            if (fraction > 0f) Box(
+                Modifier
+                    .fillMaxWidth(fraction.coerceIn(0.02f, 1f))
+                    .height(8.dp)
+                    .clip(RoundedCornerShape(topEnd = 4.dp, bottomEnd = 4.dp))
+                    .background(MaterialTheme.colorScheme.primary),
+            )
+        }
+    }
+}
+
+/** Material's "bar chart" icon, for the tab (the core icon set doesn't have it). */
+internal val AnalyticsIcon: ImageVector by lazy {
+    materialIcon(name = "Filled.BarChart") {
+        materialPath {
+            moveTo(5f, 9.2f); horizontalLineToRelative(3f); verticalLineTo(19f); horizontalLineTo(5f); close()
+            moveTo(10.6f, 5f); horizontalLineToRelative(2.8f); verticalLineToRelative(14f); horizontalLineToRelative(-2.8f); close()
+            moveTo(16.2f, 13f); horizontalLineTo(19f); verticalLineToRelative(6f); horizontalLineToRelative(-2.8f); close()
+        }
+    }
+}

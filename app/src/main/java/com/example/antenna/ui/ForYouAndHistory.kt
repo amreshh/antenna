@@ -26,11 +26,16 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.antenna.data.FeedRepository
 import com.example.antenna.data.Recommender
 import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.WatchHistoryStore
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
@@ -44,15 +49,53 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
     private val subscriptions = SubscriptionStore.get(app)
     private val seed = MutableStateFlow(System.currentTimeMillis())
 
+    /** Recent uploads from the channels you watch most (Recommender.favouriteChannels). */
+    private val channelUploads = MutableStateFlow<List<VideoItem>>(emptyList())
+    private var uploadsFetchedAt = 0L
+    private var uploadsJob: Job? = null
+
     val items: StateFlow<List<VideoItem>> =
-        combine(history.entries, subscriptions.channels, seed) { h, channels, s ->
-            Recommender.build(h, channels.map { it.name }.toSet(), s)
+        combine(history.entries, subscriptions.channels, seed, channelUploads) { h, channels, s, uploads ->
+            Recommender.build(h, channels.map { it.name }.toSet(), s, uploads)
         }
             .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    init {
+        // History loads from disk in the background: wait for it before picking channels.
+        viewModelScope.launch {
+            history.entries.first { it.isNotEmpty() }
+            fetchChannelUploads()
+        }
+    }
+
+    /** Pull to refresh: reshuffles, and fetches new uploads if the last fetch is a while ago. */
     fun reshuffle() {
         seed.value = System.currentTimeMillis()
+        fetchChannelUploads()
+    }
+
+    /**
+     * New uploads from your favourite channels you're not subscribed to, from their RSS
+     * feeds (one small request each, like the Subscriptions tab). A failed channel is just
+     * left out.
+     */
+    private fun fetchChannelUploads() {
+        val now = System.currentTimeMillis()
+        if (uploadsJob?.isActive == true || now - uploadsFetchedAt < UPLOADS_MAX_AGE_MS) return
+        uploadsJob = viewModelScope.launch {
+            val subscribed = subscriptions.channels.value.map { it.url }.toSet()
+            val favourites = withContext(Dispatchers.Default) {
+                Recommender.favouriteChannels(history.entries.value.values, now, exclude = subscribed)
+            }
+            if (favourites.isEmpty()) return@launch
+            channelUploads.value = FeedRepository.fetch(favourites).items
+            uploadsFetchedAt = now
+        }
+    }
+
+    private companion object {
+        const val UPLOADS_MAX_AGE_MS = 30 * 60 * 1000L
     }
 }
 

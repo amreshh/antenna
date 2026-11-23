@@ -71,28 +71,43 @@ android {
 dependencies {
     // YouTube stream/search extraction (same library NewPipe uses). Bump this
     // when YouTube breaks things: https://github.com/TeamNewPipe/NewPipeExtractor/releases
-    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.26.5")
+    implementation("com.github.TeamNewPipe:NewPipeExtractor:v0.27.1")
     coreLibraryDesugaring("com.android.tools:desugar_jdk_libs_nio:2.1.5")
 
     implementation("com.squareup.okhttp3:okhttp:5.5.1")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
 
     // Player
-    implementation("androidx.media3:media3-exoplayer:1.5.1")
-    implementation("androidx.media3:media3-exoplayer-hls:1.5.1")
-    implementation("androidx.media3:media3-ui:1.5.1")
+    implementation("androidx.media3:media3-exoplayer:1.11.1")
+    implementation("androidx.media3:media3-exoplayer-hls:1.11.1")
+    implementation("androidx.media3:media3-ui:1.11.1")
 
     // UI
-    implementation(platform("androidx.compose:compose-bom:2024.12.01"))
+    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
-    implementation("androidx.activity:activity-compose:1.9.3")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.8.7")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.8.7")
+    implementation("androidx.activity:activity-compose:1.13.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
     // collectAsStateWithLifecycle: screens in the background stop collecting (and recomputing)
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
-    implementation("io.coil-kt:coil-compose:2.7.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
+    // Images (thumbnails, avatars), fetched with the app's own OkHttp client (see App).
+    implementation("io.coil-kt.coil3:coil-compose:3.6.3")
+    implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
+
+    // Media3 depends on Guava 33.3.1, which has a known vulnerability
+    // (GHSA-xxph-c9ww-hj94, fixed in 33.7.2): use a fixed one. Guava stays compatible
+    // within a major version. Remove once Media3 depends on 33.7.2 or newer
+    // (the dependency scan, .github/scripts/osv-deps.py, will say if it comes back).
+    constraints {
+        implementation("com.google.guava:guava:33.8.0-android") {
+            because("GHSA-xxph-c9ww-hj94 in the Guava that Media3 depends on")
+        }
+    }
+
+    // Unit tests (app/src/test): plain JVM tests of the logic that doesn't need Android.
+    testImplementation("junit:junit:4.13.2")
 }
 
 /**

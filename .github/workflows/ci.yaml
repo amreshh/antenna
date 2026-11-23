@@ -3,12 +3,13 @@ name: ci
 # Like amreshh/wirepulse: a pull request builds and checks everything, and
 # merging it releases exactly what it built and tested.
 #
-#   pull request   unit tests, Android lint and the workflow checks (actionlint,
-#                  zizmor) side by side, and the release APK: built with R8 and
-#                  the version merging would release, then started on an
-#                  emulator (smoke test). A comment on the pull request sums it
-#                  up: each check, the test, lint, zizmor and smoke test tables,
-#                  and a link to download the APK.
+#   pull request   unit tests, Android lint, the workflow checks (actionlint,
+#                  zizmor) and the dependency scan (known vulnerabilities, from
+#                  osv.dev) side by side, and the release APK: built with R8 and
+#                  the version merging would release, its security settings
+#                  checked, then started on an emulator (smoke test, with cold
+#                  start and memory budgets). A comment on the pull request sums
+#                  it up: each check, their tables, and a link to download the APK.
 #   push to main   the release, with no checks and no build: the APK the merged
 #                  pull request built and tested, signed with the release key, a
 #                  git tag v1.2.3 and a GitHub Release with generated notes. The
@@ -23,7 +24,8 @@ name: ci
 #
 #   plan ─┬─ test ─────────┐
 #         ├─ lint ─────────┤
-#         ├─ workflows ────┼─ checks ─┬─ report (pull requests)
+#         ├─ workflows ────┤
+#         ├─ deps ─────────┼─ checks ─┬─ report (pull requests)
 #         └─ build ─ smoke ┘          └─ sign ─ release (main, tags)
 #
 # Version: merging into main bumps the patch of the latest vX.Y.Z tag; "#minor"
@@ -376,6 +378,48 @@ jobs:
           advanced-security: false
           annotations: true
 
+  # Known vulnerabilities in the libraries the release APK is built from
+  # (.github/scripts/osv-deps.py, against osv.dev): pull requests, tags and
+  # manual runs. A table in the run summary and the pull request comment; any
+  # finding fails it, unless .github/osv-ignore.txt says why it doesn't apply.
+  # (dependency-scan.yaml also runs it on main every week.)
+  deps:
+    needs: plan
+    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # Restores main's cache only; see the test job.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
+
+      - name: The release APK's libraries
+        run: ./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath > "$RUNNER_TEMP/deps.txt"
+
+      - name: Known vulnerabilities
+        run: |
+          status=0
+          python3 -I .github/scripts/osv-deps.py "$RUNNER_TEMP/deps.txt" > "$RUNNER_TEMP/deps-summary.md" || status=$?
+          cat "$RUNNER_TEMP/deps-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-summary-deps
+          path: ${{ runner.temp }}/deps-summary.md
+          if-no-files-found: ignore
+          retention-days: 7
+
   # The release APK, with R8 and the version from plan. Not on main when the
   # merged pull request's APK is released (then nothing is built).
   build:
@@ -447,6 +491,25 @@ jobs:
           path: ${{ runner.temp }}/apk-summary.md
           retention-days: 7
 
+      # Not debuggable, HTTPS only, kept out of cloud backups, only the expected
+      # exported components and permissions, signature scheme v2+, under the
+      # size budget (.github/scripts/apk-security.py). Fails before the APK is
+      # kept, so an APK that fails it is never released.
+      - name: APK security checks
+        run: |
+          status=0
+          python3 -I .github/scripts/apk-security.py "dist/antenna-v$VERSION.apk" > "$RUNNER_TEMP/apk-security-summary.md" || status=$?
+          cat "$RUNNER_TEMP/apk-security-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
+
+      - if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-summary-apk-security
+          path: ${{ runner.temp }}/apk-security-summary.md
+          if-no-files-found: ignore
+          retention-days: 7
+
       # Named after the code it's built from, so main can find it once this is
       # merged. Pull requests keep it 90 days (GitHub's limit): merged later,
       # main builds its own.
@@ -461,7 +524,9 @@ jobs:
           overwrite: true # a re-run replaces it
 
   # The APK on an emulator (.github/scripts/smoke-test.sh): it installs and
-  # starts, the home screen shows, the player loads a video, nothing crashes.
+  # starts, the home screen shows, the player loads a video and minimizes,
+  # search finds videos and opens a channel, nothing crashes; and cold start and
+  # memory stay within their budgets.
   # Everywhere the APK is built, except dev pushes.
   smoke:
     needs: [plan, build]
@@ -529,7 +594,7 @@ jobs:
   # was cancelled. (A skipped job counts as passed, so requiring build alone
   # would let a failed lint through.)
   checks:
-    needs: [plan, test, lint, workflows, build, smoke]
+    needs: [plan, test, lint, workflows, deps, build, smoke]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions: {}
@@ -538,7 +603,7 @@ jobs:
         env:
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
-          echo "plan, test, lint, workflows, build, smoke: $RESULTS"
+          echo "plan, test, lint, workflows, deps, build, smoke: $RESULTS"
           case " $RESULTS " in
             *" failure "* | *" cancelled "*) exit 1 ;;
           esac
@@ -547,7 +612,7 @@ jobs:
   # (.github/scripts/ci-report.sh), updated on every run. (Pull requests from
   # forks get a read-only token: no comment.)
   report:
-    needs: [plan, test, lint, workflows, build, smoke]
+    needs: [plan, test, lint, workflows, deps, build, smoke]
     if: ${{ !cancelled() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
     runs-on: ubuntu-24.04
     permissions:
@@ -558,7 +623,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # The tables: tests, lint, zizmor, APK, smoke test. One is missing when its
+      # The tables: tests, lint, zizmor, dependencies, APK, APK security, smoke
+      # test. One is missing when its
       # job didn't get that far.
       - name: Get the tables
         continue-on-error: true
@@ -578,6 +644,7 @@ jobs:
           TEST: ${{ needs.test.result }}
           LINT: ${{ needs.lint.result }}
           WORKFLOWS: ${{ needs.workflows.result }}
+          DEPS: ${{ needs.deps.result }}
           BUILD: ${{ needs.build.result }}
           SMOKE: ${{ needs.smoke.result }}
           APK_URL: ${{ needs.build.outputs.apk-url }}

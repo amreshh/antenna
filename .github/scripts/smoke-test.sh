@@ -10,9 +10,14 @@
 # comment) and screenshots to $SCREENSHOTS, and fails when a check fails. When a
 # check fails, the app's log follows in the output.
 #
-# The player check needs YouTube. When YouTube won't serve the video to the
-# network the test runs on (it limits datacenter IPs like CI's), the check
-# passes with a warning: only an error from the app itself fails it.
+# The player, search and channel checks need YouTube. When YouTube won't serve
+# the network the test runs on (it limits datacenter IPs like CI's), they pass
+# with a warning: only an error from the app itself fails them.
+#
+# It also measures performance, with budgets that fail the test when exceeded
+# (generous ones, for an emulator: they catch big regressions, not small ones):
+#   STARTUP_BUDGET_MS  median cold start of 5, from launch to first frame (4000)
+#   MEMORY_BUDGET_MB   memory (PSS) with a video loaded (400)
 set -uo pipefail
 
 apk=${APK:?set APK to the APK to test}
@@ -20,6 +25,9 @@ summary=${SUMMARY:-smoke-summary.md}
 shots=${SCREENSHOTS:-smoke-screenshots}
 pkg=com.example.antenna
 video=${VIDEO:-https://www.youtube.com/watch?v=dQw4w9WgXcQ} # public, and up for 15+ years
+query=${QUERY:-rick astley}
+startup_budget=${STARTUP_BUDGET_MS:-4000}
+memory_budget=${MEMORY_BUDGET_MB:-400}
 adb="${ANDROID_HOME:+$ANDROID_HOME/platform-tools/}adb"
 mkdir -p "$shots"
 
@@ -44,6 +52,28 @@ for node in root.iter("node"):
         break
 ' "$1"
 }
+
+# The middle of the view with the given test tag or content description, for a
+# tap: "x y", or nothing when it isn't on screen.
+center() { # <attribute> <value>
+  python3 -I -c '
+import re, sys, xml.etree.ElementTree as ET
+try:
+    root = ET.fromstring(sys.stdin.read())
+except ET.ParseError:
+    sys.exit()
+for node in root.iter("node"):
+    if node.get(sys.argv[1]) == sys.argv[2]:
+        x1, y1, x2, y2 = map(int, re.findall(r"\d+", node.get("bounds", "")))
+        print((x1 + x2) // 2, (y1 + y2) // 2)
+        break
+' "$1" "$2"
+}
+# YouTube refusing this network (see the top), from an error message.
+limited() { [[ "$1" == "YouTube is limiting requests"* || "$1" == "Can"*"t reach YouTube"* ]]; }
+
+# Performance numbers, for their own table: "| what | value | budget |".
+perf=()
 
 # Each check is a function. It can set $note (shown next to the result) and
 # $warn (passed, with a warning). After the first failure the rest don't run.
@@ -82,7 +112,7 @@ home_screen() {
   local xml
   for _ in $(seq 15); do
     xml=$(ui)
-    if grep -q 'text="For you"' <<< "$xml" && grep -q 'text="Search"' <<< "$xml"; then
+    if grep -q 'text="For you"' <<< "$xml" && grep -q 'content-desc="Search"' <<< "$xml"; then
       screenshot home
       return 0
     fi
@@ -95,7 +125,8 @@ home_screen() {
 
 player() {
   local xml title error
-  "$adb" shell am start -W -n "$pkg/.ui.PlayerActivity" --es url "$video" > /dev/null 2>&1
+  # Opened the way a link from another app opens it (the app is already running).
+  "$adb" shell am start -W -a android.intent.action.VIEW -d "$video" -n "$pkg/.ui.MainActivity" > /dev/null 2>&1
   for _ in $(seq 30); do
     sleep 2
     if crashed || ! running; then
@@ -103,7 +134,7 @@ player() {
       return 1
     fi
     # The player tags its title and its error message (TAG_TITLE, TAG_ERROR in
-    # PlayerActivity.kt), so they're found whatever else is on screen.
+    # PlayerScreen.kt), so they're found whatever else is on screen.
     xml=$(ui)
     title=$(tagged player_title <<< "$xml")
     error=$(tagged player_error <<< "$xml")
@@ -129,6 +160,142 @@ player() {
   return 1
 }
 
+# Back shrinks the player into the mini player (TAG_MINI) above the tabs.
+minimizes() {
+  local xml
+  "$adb" shell input keyevent KEYCODE_BACK
+  for _ in $(seq 10); do
+    sleep 1
+    xml=$(ui)
+    if grep -q 'resource-id="mini_player"' <<< "$xml" && grep -q 'text="For you"' <<< "$xml"; then
+      screenshot mini-player
+      return 0
+    fi
+  done
+  screenshot mini-player
+  note="no mini player over the tabs after Back"
+  return 1
+}
+
+# Memory (PSS) with the video loaded, after the player check.
+memory() {
+  local kb mb
+  kb=$("$adb" shell dumpsys meminfo "$pkg" | tr -d '\r' |
+    sed -n -e 's/^ *TOTAL PSS: *\([0-9]*\).*/\1/p' -e 's/^ *TOTAL *\([0-9]*\) .*/\1/p' | head -1)
+  [ -n "$kb" ] || { note="dumpsys meminfo gave no total"; return 1; }
+  mb=$((kb / 1024))
+  note="$mb MB"
+  perf+=("| Memory (PSS) with a video loaded | $mb MB | under $memory_budget MB |")
+  [ "$mb" -le "$memory_budget" ] || { note="$mb MB, over the $memory_budget MB budget"; return 1; }
+}
+
+# The magnifier in the top bar opens search; a query shows results, each with
+# its channel's avatar (TAG_CHANNEL_AVATAR in VideoLayouts.kt).
+search() {
+  local xml at error
+  xml=$(ui)
+  at=$(center content-desc Search <<< "$xml")
+  [ -n "$at" ] || { note="no Search button in the top bar"; return 1; }
+  # shellcheck disable=SC2086 # "x y"
+  "$adb" shell input tap $at
+  sleep 2
+  "$adb" shell input text "${query// /%s}"
+  "$adb" shell input keyevent KEYCODE_ENTER
+  for _ in $(seq 20); do
+    sleep 2
+    if crashed || ! running; then
+      note="the app crashed"
+      return 1
+    fi
+    xml=$(ui)
+    if [ -n "$(center resource-id channel_avatar <<< "$xml")" ]; then
+      screenshot search
+      note="for “$query”"
+      return 0
+    fi
+    error=$(tagged search_error <<< "$xml")
+    if [ -n "$error" ]; then
+      screenshot search
+      if limited "$error"; then
+        warn="YouTube didn't answer this network, so search wasn't checked: $error"
+        return 0
+      fi
+      note="search shows an error: $error"
+      return 1
+    fi
+  done
+  screenshot search
+  note="no results after 40 seconds"
+  return 1
+}
+
+# A result's channel avatar opens the channel's page (TAG_CHANNEL_NAME in
+# ChannelScreen.kt), and Back returns to the results.
+channel() {
+  local xml at name error
+  xml=$(ui)
+  at=$(center resource-id channel_avatar <<< "$xml")
+  if [ -z "$at" ]; then
+    warn="no search results to open a channel from"
+    return 0
+  fi
+  # shellcheck disable=SC2086 # "x y"
+  "$adb" shell input tap $at
+  for _ in $(seq 20); do
+    sleep 2
+    if crashed || ! running; then
+      note="the app crashed"
+      return 1
+    fi
+    xml=$(ui)
+    name=$(tagged channel_name <<< "$xml")
+    error=$(tagged channel_error <<< "$xml")
+    if [ -n "$error" ]; then
+      screenshot channel
+      if limited "$error"; then
+        warn="YouTube didn't answer this network, so the channel page wasn't checked: $error"
+        return 0
+      fi
+      note="the channel page shows an error: $error"
+      return 1
+    fi
+    # Its videos have loaded once a video's channel line is there.
+    if [ -n "$name" ] && grep -q 'text="[^"]* · [^"]*"' <<< "$xml"; then
+      screenshot channel
+      note="it opened “$name”"
+      "$adb" shell input keyevent KEYCODE_BACK
+      sleep 2
+      [ -n "$(center resource-id channel_avatar <<< "$(ui)")" ] && return 0
+      note="Back from “$name” didn't return to the results"
+      return 1
+    fi
+  done
+  screenshot channel
+  note="the channel page didn't load in 40 seconds"
+  return 1
+}
+
+# Cold starts: the app stopped, then started 5 times; the median time from
+# launch to its first frame (am start -W's TotalTime). Runs last: it restarts
+# the app.
+cold_start() {
+  local times=() out t median
+  for _ in 1 2 3 4 5; do
+    "$adb" shell am force-stop "$pkg"
+    sleep 1
+    out=$("$adb" shell am start -W -n "$pkg/.ui.MainActivity" 2>&1 | tr -d '\r')
+    t=$(sed -n 's/^TotalTime: *\([0-9]*\)$/\1/p' <<< "$out")
+    [ -n "$t" ] || { note="am start gave no time"; return 1; }
+    times+=("$t")
+    sleep 2
+  done
+  crashed && { note="the app crashed"; return 1; }
+  median=$(printf '%s\n' "${times[@]}" | sort -n | sed -n 3p)
+  note="$median ms (runs: ${times[*]} ms)"
+  perf+=("| Cold start, launch to first frame (median of 5) | $median ms | under $startup_budget ms |")
+  [ "$median" -le "$startup_budget" ] || { note="$median ms, over the $startup_budget ms budget (runs: ${times[*]} ms)"; return 1; }
+}
+
 no_crash() {
   if crashed; then
     note="see the crash in the job log"
@@ -147,7 +314,12 @@ check "It installs" installs
 check "It starts" starts
 check "The home screen shows its tabs" home_screen
 check "The player opens a video" player
+check "Memory with a video loaded" memory
+check "Back minimizes the player" minimizes
+check "Search shows results" search
+check "A result's avatar opens its channel" channel
 check "Nothing crashed" no_crash
+check "Cold start" cold_start
 
 aapt2=${AAPT2:-$(find "${ANDROID_HOME:-/nonexistent}/build-tools" -name aapt2 2> /dev/null | sort -V | tail -1)}
 version=$("${aapt2:-aapt2}" dump badging "$apk" 2> /dev/null | sed -n "s/.*versionName='\([^']*\)'.*/\1/p")
@@ -161,6 +333,15 @@ device=$("$adb" shell getprop ro.build.version.release | tr -d '\r')
   echo "| Check | Result |"
   echo "| --- | --- |"
   printf '%s\n' "${rows[@]}"
+  if [ ${#perf[@]} -gt 0 ]; then
+    echo
+    echo "**Performance** (on the emulator, so slower than a phone; the budgets catch big regressions)"
+    echo
+    echo "| Measured | Value | Budget |"
+    echo "| --- | --- | --- |"
+    printf '%s\n' "${perf[@]}"
+    echo "| APK size | $size MB | checked by the build job |"
+  fi
 } > "$summary"
 cat "$summary"
 
