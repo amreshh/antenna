@@ -7,6 +7,8 @@ import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import android.app.Application
 import android.net.Uri
+import android.os.SystemClock
+import android.util.Log
 import android.widget.Toast
 import androidx.annotation.OptIn
 import androidx.compose.runtime.getValue
@@ -25,8 +27,13 @@ import androidx.media3.common.util.Util
 import androidx.media3.exoplayer.ExoPlayer
 import com.example.antenna.App
 import com.example.antenna.data.Channel
+import com.example.antenna.data.OpenSource
+import com.example.antenna.data.Prefetcher
 import com.example.antenna.data.Prefs
 import com.example.antenna.data.SubscriptionStore
+import com.example.antenna.data.WatchLogStore
+import com.example.antenna.data.WatchSpan
+import com.example.antenna.data.channelKey
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.WatchHistoryStore
 import com.example.antenna.data.WatchLaterStore
@@ -77,6 +84,15 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         /** How far ahead the player buffers: it loads again below the first, and stops at the second. */
         const val MIN_BUFFER_MS = 15_000
         const val MAX_BUFFER_MS = 30_000
+
+        /**
+         * How much has to be buffered before a video starts: 1 s rather than Media3's 2.5 s, so
+         * it starts sooner. After a stall it's still Media3's 5 s, so a slow connection doesn't
+         * stall again straight away.
+         */
+        const val START_BUFFER_MS = 1_000
+
+        const val TAG = "Player"
     }
 
     private val app get() = getApplication<Application>()
@@ -85,6 +101,14 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     private val history = WatchHistoryStore.get(app)
     private val watchLater = WatchLaterStore.get(app)
     private val sponsorBlock = SponsorBlockClient(App.http)
+    private val prefetcher = Prefetcher.get(app)
+    private val watchLog = WatchLogStore.get(app)
+
+    /** Where the videos opened since the app started were opened from, by id: for the watch log. */
+    private val sources = HashMap<String, OpenSource>()
+
+    /** The stretch of watching going on now: it ends when the video pauses, seeks or stops (WatchLogStore). */
+    private var span: WatchSpan? = null
 
     val subscribedChannels: StateFlow<List<Channel>> get() = subscriptions.channels
 
@@ -152,6 +176,15 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     /** How many times this video's links were refreshed after an error. */
     private var refreshes = 0
 
+    // When the open video started loading, when its streams went to the player, and when its
+    // first frame showed: for how long it took to start playing, logged then (logStart).
+    private var openedAt = 0L
+    private var preparedAt = 0L
+    private var firstFrameAt = 0L
+
+    /** The open video's start is still to be logged: it was opened to play straight away. */
+    private var timingStart = false
+
     /** Videos you came from via "Up next", so Back goes to the previous one like YouTube. */
     private val backStack = ArrayDeque<String>()
 
@@ -181,7 +214,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                 .setBufferDurationsMs(
                     MIN_BUFFER_MS,
                     MAX_BUFFER_MS,
-                    DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                    START_BUFFER_MS,
                     DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
                 )
                 .build(),
@@ -195,13 +228,33 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
             addListener(object : Player.Listener {
                 override fun onPlayerError(error: PlaybackException) = onPlaybackError(error)
 
+                override fun onRenderedFirstFrame() {
+                    // Shown while it buffers, before it plays: of this video's streams only.
+                    if (firstFrameAt == 0L && preparedAt >= openedAt) firstFrameAt = SystemClock.elapsedRealtime()
+                }
+
                 override fun onPlaybackStateChanged(state: Int) {
                     if (state == Player.STATE_ENDED) saveProgress()
                 }
 
                 override fun onIsPlayingChanged(playing: Boolean) {
                     this@PlayerViewModel.isPlaying = playing
-                    if (!playing) saveProgress()
+                    if (playing) {
+                        logStart()
+                        startSpan()
+                    } else {
+                        endSpan()
+                        saveProgress()
+                    }
+                }
+
+                // A seek (yours, or a SponsorBlock skip) ends the stretch where it was, and
+                // starts the next where it lands: what was jumped over wasn't watched.
+                override fun onPositionDiscontinuity(oldPosition: Player.PositionInfo, newPosition: Player.PositionInfo, reason: Int) {
+                    if (reason != Player.DISCONTINUITY_REASON_SEEK && reason != Player.DISCONTINUITY_REASON_SEEK_ADJUSTMENT) return
+                    if (span == null) return
+                    endSpan(oldPosition.positionMs)
+                    if (isPlaying) startSpan(newPosition.positionMs)
                 }
 
                 override fun onEvents(player: Player, events: Player.Events) {
@@ -215,28 +268,53 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
 
     // --- Opening and closing ---------------------------------------------------------
 
-    /** A video tapped in a list: it replaces whatever is playing, and Back minimizes it. */
-    fun open(url: String) {
+    /** A video tapped in a list ([source]): it replaces whatever is playing, and Back minimizes it. */
+    fun open(url: String, source: OpenSource) {
         if (url.sameVideoAs(currentUrl)) {
             expand()
             return
         }
         backStack.clear()
+        opened(url, source)
         show(url, addToBackStack = false)
         expand()
     }
 
     /**
-     * A link from another app, or another video linked in the description: the video that's
-     * playing goes on the back stack, so Back returns to it.
+     * A video in Up next, a link from another app, or another video linked in the description
+     * ([source]): the video that's playing goes on the back stack, so Back returns to it.
      */
-    fun openLink(url: String) {
-        if (!url.sameVideoAs(currentUrl)) show(url, addToBackStack = true)
+    fun openLink(url: String, source: OpenSource) {
+        if (!url.sameVideoAs(currentUrl)) {
+            opened(url, source)
+            show(url, addToBackStack = true)
+        }
         expand()
+    }
+
+    /** You opened [url] from [source] (not Back to it): for the watch log, and the app's guesses. */
+    private fun opened(url: String, source: OpenSource) {
+        videoIdOf(url)?.let { sources[it] = source }
+        prefetcher.onVideoOpened(url) // was it one the app guessed you'd open?
+    }
+
+    /** A stretch of watching starts, at [at] in the video. */
+    private fun startSpan(at: Long = exoPlayer?.currentPosition ?: 0) {
+        val video = currentVideo ?: return
+        val id = videoIdOf(video.url) ?: return
+        span = WatchSpan(id, video.channelKey(), System.currentTimeMillis(), at, at, sources[id])
+    }
+
+    /** The stretch of watching ends, at [at] in the video: into the watch log. */
+    private fun endSpan(at: Long? = exoPlayer?.currentPosition) {
+        val s = span ?: return
+        span = null
+        watchLog.add(s.copy(toMs = at ?: s.toMs))
     }
 
     /** Stops the video and removes the player from the screen. */
     fun close() {
+        endSpan()
         saveProgress()
         loadJob?.cancel()
         exoPlayer?.run {
@@ -402,6 +480,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     }
 
     override fun onCleared() {
+        endSpan()
         saveProgress()
         history.flush()
         exoPlayer?.release()
@@ -411,6 +490,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     // --- Loading ---------------------------------------------------------------------
 
     private fun show(url: String, addToBackStack: Boolean, autoplay: Boolean = true) {
+        endSpan() // before the video's gone
         saveProgress()
         if (addToBackStack) currentUrl?.let { backStack.addLast(it) }
         currentUrl = url
@@ -425,6 +505,9 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         allowed.clear()
         saved[STATE_URL] = url
         saved[STATE_BACK_STACK] = ArrayList(backStack)
+        openedAt = SystemClock.elapsedRealtime()
+        firstFrameAt = 0L
+        timingStart = autoplay
 
         loadJob?.cancel()
         player.stop()
@@ -459,6 +542,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                 qualities = available
                 player.setMediaSource(source, startAt)
                 player.prepare()
+                preparedAt = SystemClock.elapsedRealtime()
                 player.playWhenReady = autoplay
                 if (startAt > 0 && autoplay) toast("Resuming from ${formatDuration(startAt / 1000)}")
 
@@ -479,6 +563,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                     channel = channelOf(info),
                     subscribers = formatCount(info.uploaderSubscriberCount, "subscriber"),
                     segments = null,
+                    durationMs = info.duration * 1000,
                     related = related,
                     stats = listOf(formatCount(info.viewCount, "view"), video.ageLabel())
                         .filter { it.isNotBlank() }
@@ -495,6 +580,26 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         } catch (e: Exception) {
             uiState = PlayerUiState.Error(e.readable())
         }
+    }
+
+    /**
+     * Logs how long the open video took to start playing: fetching its details and links,
+     * then buffering (its first frame shows before it plays). Once per video, and only when
+     * it was opened to play straight away. The smoke test reports it.
+     */
+    private fun logStart() {
+        if (!timingStart || preparedAt < openedAt) return // not yet this video's streams
+        timingStart = false
+        currentUrl?.let { prefetcher.onVideoStarted(it, detailsMs = preparedAt - openedAt) }
+        val now = SystemClock.elapsedRealtime()
+        val firstFrame = if (firstFrameAt > 0) "${firstFrameAt - openedAt} ms" else "none"
+        val format = exoPlayer?.videoFormat
+        Log.i(
+            TAG,
+            "Playing after ${now - openedAt} ms (details ${preparedAt - openedAt} ms, buffering " +
+                "${now - preparedAt} ms; first frame at $firstFrame): " +
+                "${format?.height}p ${format?.codecs ?: format?.sampleMimeType}",
+        )
     }
 
     private fun saveProgress() {
@@ -527,6 +632,8 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
             while (true) {
                 delay(5_000)
                 if (isPlaying) saveProgress()
+                // The stretch so far, kept in case the app is closed before it ends.
+                span?.let { s -> exoPlayer?.let { watchLog.checkpoint(s.copy(toMs = it.currentPosition)) } }
             }
         }
     }
@@ -542,8 +649,11 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                 }
                 if (seg != null) {
                     val duration = player.duration
-                    player.seekTo(if (duration != C.TIME_UNSET) minOf(seg.endMs, duration) else seg.endMs)
+                    val to = if (duration != C.TIME_UNSET) minOf(seg.endMs, duration) else seg.endMs
+                    player.seekTo(to)
                     toast("Skipped: ${SponsorCategory.labelFor(seg.category)}")
+                    // For the Analytics tab: what was skipped, and how much.
+                    currentVideo?.let { history.recordSkip(it, seg.category, seg.startMs, skippedMs = to - pos) }
                     if (prefs.reportSkips && reported.add(seg.uuid)) sponsorBlock.reportSkip(seg.uuid)
                 }
             }
@@ -587,7 +697,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         val id = youtubeVideoId(link)
         when {
             id == null -> openElsewhere(uri)
-            id != currentUrl?.let(::videoIdOf) -> openLink(watchUrl(id))
+            id != currentUrl?.let(::videoIdOf) -> openLink(watchUrl(id), OpenSource.Link)
             else -> startSeconds(uri)?.let { seconds ->
                 player.seekTo(seconds * 1000)
                 player.play()

@@ -4,7 +4,12 @@ import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
 import org.schabi.newpipe.extractor.channel.ChannelInfoItem
 import android.text.format.DateUtils
 import android.util.Log
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
 import kotlinx.coroutines.withContext
 import org.schabi.newpipe.extractor.Image
 import org.schabi.newpipe.extractor.InfoItem
@@ -36,7 +41,13 @@ data class VideoItem(
     val channelUrl: String? = null,
     /** The uploader's avatar, when the list it came from has one (search results do). */
     val channelAvatarUrl: String? = null,
-)
+) {
+    /**
+     * A YouTube Short. The Subscriptions feed (channels' RSS) links them as
+     * youtube.com/shorts/…, and other videos as /watch?v=…; other lists don't tell them apart.
+     */
+    val isShort: Boolean get() = "/shorts/" in url
+}
 
 data class SearchPage(val items: List<VideoItem>, val nextPage: Page?)
 
@@ -134,13 +145,49 @@ object YouTubeRepository {
      * Back through Up next doesn't fetch them again; [fresh] fetches them anyway (new links,
      * after a playback error). Links last some hours, far longer than they're kept.
      */
-    suspend fun streamInfo(url: String, fresh: Boolean = false): StreamInfo = withContext(Dispatchers.IO) {
+    suspend fun streamInfo(url: String, fresh: Boolean = false): StreamInfo {
         val id = videoIdOf(url)
-        val now = System.currentTimeMillis()
         if (!fresh && id != null) {
-            synchronized(recentInfo) { recentInfo[id]?.takeIf { now - it.first < INFO_KEEP_MS }?.second }?.let { return@withContext it }
+            kept(id)?.let { return it }
+            // Being fetched ahead (a guess, see prefetch): wait for that rather than fetch it twice.
+            synchronized(recentInfo) { fetching[id] }?.let { ahead ->
+                try {
+                    return ahead.await()
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (_: Exception) {
+                    // that one failed: try again below
+                }
+            }
         }
-        StreamInfo.getInfo(youtube, url).also { info ->
+        return withContext(Dispatchers.IO) { fetchInfo(url, id) }
+    }
+
+    /**
+     * Fetches a video's details before it's opened (Prefetcher's guesses), kept like any
+     * other's. [streamInfo] waits for one that's still on its way.
+     */
+    suspend fun prefetch(url: String) {
+        val id = videoIdOf(url) ?: return
+        val job = synchronized(recentInfo) {
+            if (kept(id) != null) return
+            fetching[id] ?: ahead.async { fetchInfo(url, id) }.also { fetching[id] = it }
+        }
+        try {
+            job.await()
+        } finally {
+            synchronized(recentInfo) { if (fetching[id] === job) fetching.remove(id) }
+        }
+    }
+
+    /** A video's details fetched in the last [INFO_KEEP_MS], if they're kept. */
+    private fun kept(id: String): StreamInfo? = synchronized(recentInfo) {
+        recentInfo[id]?.takeIf { System.currentTimeMillis() - it.first < INFO_KEEP_MS }?.second
+    }
+
+    private fun fetchInfo(url: String, id: String?): StreamInfo {
+        val now = System.currentTimeMillis()
+        return StreamInfo.getInfo(youtube, url).also { info ->
             if (id != null) synchronized(recentInfo) { recentInfo[id] = now to info }
         }
     }
@@ -151,6 +198,12 @@ object YouTubeRepository {
     }
     private const val INFO_KEPT = 8
     private const val INFO_KEEP_MS = 30 * 60 * 1000L
+
+    /** Details being fetched ahead, by video id (guarded by [recentInfo]). */
+    private val fetching = HashMap<String, Deferred<StreamInfo>>()
+
+    /** Fetches ahead keep going even if what started them stops waiting: they're kept for whoever opens the video. */
+    private val ahead = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private fun InfoItemsPage<InfoItem>.toSearchPage(): SearchPage {
         val videos = items.filterIsInstance<StreamInfoItem>()

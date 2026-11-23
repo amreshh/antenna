@@ -14,6 +14,8 @@ data class Channel(
     val url: String,
     val name: String,
     val avatarUrl: String? = null,
+    /** When you subscribed; 0 when that isn't known (subscribed before it was recorded). */
+    val subscribedAt: Long = 0,
 )
 
 /**
@@ -37,7 +39,7 @@ class SubscriptionStore private constructor(context: Context) {
     fun subscribe(channel: Channel) {
         val url = normalizeChannelUrl(channel.url) ?: return
         if (isSubscribed(url)) return
-        save(_channels.value + channel.copy(url = url))
+        save(_channels.value + channel.copy(url = url, subscribedAt = System.currentTimeMillis()))
     }
 
     @Synchronized
@@ -64,9 +66,10 @@ class SubscriptionStore private constructor(context: Context) {
     @Synchronized
     fun addAll(channels: List<Channel>): Int {
         val existing = _channels.value.map { it.url }.toMutableSet()
+        val now = System.currentTimeMillis()
         val fresh = channels.mapNotNull { c ->
             val url = normalizeChannelUrl(c.url) ?: return@mapNotNull null
-            if (existing.add(url)) c.copy(url = url) else null
+            if (existing.add(url)) c.copy(url = url, subscribedAt = now) else null
         }
         if (fresh.isNotEmpty()) save(_channels.value + fresh)
         return fresh.size
@@ -80,7 +83,8 @@ class SubscriptionStore private constructor(context: Context) {
                 JSONObject()
                     .put("url", it.url)
                     .put("name", it.name)
-                    .put("avatar", it.avatarUrl ?: JSONObject.NULL),
+                    .put("avatar", it.avatarUrl ?: JSONObject.NULL)
+                    .put("since", it.subscribedAt),
             )
         }
         sp.edit { putString(KEY, json.toString()) }
@@ -106,6 +110,7 @@ class SubscriptionStore private constructor(context: Context) {
                     url = o.getString("url"),
                     name = o.optString("name"),
                     avatarUrl = if (o.isNull("avatar")) null else o.optString("avatar"),
+                    subscribedAt = o.optLong("since"), // 0 in older lists
                 )
             }.getOrNull()
         }

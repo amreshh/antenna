@@ -40,12 +40,22 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_HIDE_WATCHED, false)
         set(value) = sp.edit { putBoolean(KEY_HIDE_WATCHED, value) }
 
+    /**
+     * When the app opens, fetch the details of a few videos you're likely to open (Prefetcher),
+     * so they start sooner. On by default: it's a few small requests, and it stops fetching
+     * by itself when its guesses keep missing.
+     */
+    var prefetch: Boolean
+        get() = sp.getBoolean(KEY_PREFETCH, true)
+        set(value) = sp.edit { putBoolean(KEY_PREFETCH, value) }
+
     companion object {
         /** [maxHeightMetered]: no lower limit on mobile data. */
         const val SAME_AS_WIFI = 0
 
         private const val KEY_MAX_HEIGHT_METERED = "max_height_metered"
         private const val KEY_HIDE_WATCHED = "hide_watched"
+        private const val KEY_PREFETCH = "prefetch"
         private const val KEY_CATEGORIES = "sb_categories"
         private const val KEY_MAX_HEIGHT = "max_height"
         private const val KEY_REPORT_SKIPS = "sb_report_skips"

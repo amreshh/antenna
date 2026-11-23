@@ -1,7 +1,9 @@
 package com.example.antenna.data
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Video and channel links from anywhere, and the Google Takeout subscriptions import. */
@@ -26,6 +28,13 @@ class LinksAndImportTest {
         listOf("https://example.com/", "not a link", "https://www.youtube.com/@somebody").forEach {
             assertNull(it, videoIdOf(it))
         }
+    }
+
+    @Test
+    fun `Shorts are told apart by their links, as the feed has them`() {
+        val short = TestData.video(1).copy(url = "https://www.youtube.com/shorts/dnbLdUyozKM")
+        assertTrue(short.isShort)
+        assertFalse(TestData.video(2).isShort) // a /watch?v= link
     }
 
     @Test

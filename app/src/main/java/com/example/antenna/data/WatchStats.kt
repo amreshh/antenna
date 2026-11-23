@@ -1,11 +1,19 @@
 package com.example.antenna.data
 
+import com.example.antenna.data.StatsFilter.Kind
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
 
 /** Time spent on one topic or category, for the Analytics tab. */
-data class TopicTime(val name: String, val watchedMs: Long, val videos: Int)
+data class TopicTime(
+    /** What it's grouped and filtered by: a topic in lower case, a category as YouTube writes it. */
+    val key: String,
+    /** How it's shown: the way it's written most often. */
+    val name: String,
+    val watchedMs: Long,
+    val videos: Int,
+)
 
 /** Time spent on one channel, for the Analytics tab's top channels. */
 data class ChannelTime(
@@ -18,13 +26,33 @@ data class ChannelTime(
     val videos: Int,
 )
 
+/** What SponsorBlock skipped of one kind, for the Analytics tab. */
+data class SkipTime(
+    /** SponsorBlock's category ("sponsor", "selfpromo"…). */
+    val category: String,
+    val skippedMs: Long,
+    val segments: Int,
+    /** The videos it was skipped in. */
+    val videos: Int,
+)
+
+/** Watch time, and the videos it's from. */
+data class Share(val watchedMs: Long, val videos: Int)
+
+/** Videos of one length ([WatchStats.LENGTH_LABELS]): watch time, how many, how many finished. */
+data class LengthTime(val watchedMs: Long, val videos: Int, val finished: Int)
+
+/** Videos opened from one place. */
+data class SourceTime(val source: OpenSource, val watchedMs: Long, val videos: Int)
+
 /**
  * The Analytics tab's numbers, worked out on the phone from the watch history (up to the
  * 1000 videos it keeps).
  *
  * Watch time is how far into each video you got: the history keeps one position per video,
  * so watching something twice, or skipping around, isn't counted separately. It's counted on
- * the day and hour you last watched it.
+ * the day and hour you last watched it. (What you actually played is in the watch log:
+ * [Analytics.sittings].)
  */
 data class WatchStats(
     val videos: Int,
@@ -35,115 +63,412 @@ data class WatchStats(
     /** Watch time per day for the last [DAYS] days, oldest first; the last is today. */
     val perDay: List<Long>,
     val firstDay: LocalDate,
+    /** The last 7 days (today among them), and the 7 before. */
+    val thisWeek: Share,
+    val lastWeek: Share,
     /** The channels you've spent the most time on, most first. */
     val topChannels: List<ChannelTime>,
+    /** Channels you subscribe to, and the rest. */
+    val subscribed: Share,
+    val notSubscribed: Share,
+    /** The channels you've watched most without subscribing to them, most first. */
+    val unsubscribedChannels: List<ChannelTime>,
     /** Watch time by the hour of the day you watched, 0…23. */
     val byHour: List<Long>,
     /** How far you get into videos: [finished, over half, under half, barely (under 10%)]. */
     val completion: List<Int>,
+    /** By how long the videos are ([LENGTH_LABELS]); only videos whose length is known. */
+    val byLength: List<LengthTime>,
+    /** By where you opened them from, most first; only videos opened since that's recorded. */
+    val bySource: List<SourceTime>,
+    val withSource: Int,
+    /** By how new videos were when you first watched them ([AGE_LABELS]); only those with an upload date. */
+    val byAge: List<Share>,
+    val withAge: Int,
+    /** Half the videos were newer than this when you first watched them. */
+    val medianAgeMs: Long?,
     /** YouTube's categories, by watch time; only videos watched since categories are recorded. */
     val categories: List<TopicTime>,
     /** How many videos have a category (the rest were watched before it was recorded). */
     val withCategory: Int,
     /** The topics you watch most, by watch time, from titles and tags ([topicsOf]). */
     val topics: List<TopicTime>,
+    /** What SponsorBlock skipped, by kind, most first; only in videos watched since skips are recorded. */
+    val skips: List<SkipTime>,
+    /** All of [skips] together: the time skipped, the segments, and the videos they were in. */
+    val skippedMs: Long,
+    val skippedSegments: Int,
+    val videosWithSkips: Int,
 ) {
     companion object {
         const val DAYS = 30
         const val TOP_CHANNELS = 8
         const val TOP_CATEGORIES = 8
         const val TOP_TOPICS = 12
+        const val TOP_UNSUBSCRIBED = 5
 
         /** A topic counts once it comes up in this many videos. */
         const val MIN_TOPIC_VIDEOS = 2
         val COMPLETION_LABELS = listOf("Finished", "Over half", "Under half", "Barely started")
+        val LENGTH_LABELS = listOf("Under 5 min", "5–20 min", "20–60 min", "Over an hour")
+        val AGE_LABELS = listOf("The day it came out", "Within a week", "Within a month", "Within a year", "Older")
     }
 }
 
-fun watchStats(history: Collection<WatchEntry>, now: Long, zone: ZoneId = ZoneId.systemDefault()): WatchStats {
-    val today = Instant.ofEpochMilli(now).atZone(zone).toLocalDate()
-    val firstDay = today.minusDays(WatchStats.DAYS - 1L)
+/**
+ * Something the Analytics tab can be narrowed to, picked by tapping it in its card: a day, an
+ * hour, a channel… [key] says which, the way its [Kind] describes; [label] is how it's shown.
+ */
+data class StatsFilter(val kind: Kind, val key: String, val label: String) {
+
+    enum class Kind {
+        /** Videos last watched on a day: [key] is its epoch day. */
+        Day,
+
+        /** Last watched in an hour of the day, "0" to "23". */
+        Hour,
+
+        /** From a channel: its [channelKey]. */
+        Channel,
+
+        /** From channels you subscribe to ([SUBSCRIBED]) or not ([NOT_SUBSCRIBED]). */
+        Subscribed,
+
+        /** By how far you got into them: an index of [WatchStats.COMPLETION_LABELS]. */
+        Completion,
+
+        /** By length: an index of [WatchStats.LENGTH_LABELS]. */
+        Length,
+
+        /** Opened from somewhere: an [OpenSource]'s name. */
+        Source,
+
+        /** By how new they were when you first watched them: an index of [WatchStats.AGE_LABELS]. */
+        Age,
+
+        /** About a topic: its key ([topicsOf]), in lower case. */
+        Topic,
+
+        /** In one of YouTube's categories, as it writes it. */
+        Category,
+
+        /** With a kind of segment skipped: SponsorBlock's category ("sponsor"…). */
+        Skipped,
+    }
+
+    companion object {
+        const val SUBSCRIBED = "subscribed"
+        const val NOT_SUBSCRIBED = "other"
+
+        /** [filters] as strings, to keep with a screen's saved state; [restore] reads them back. */
+        fun save(filters: List<StatsFilter>): List<String> = filters.flatMap { listOf(it.kind.name, it.key, it.label) }
+
+        fun restore(saved: List<String>): List<StatsFilter> = saved.chunked(3).mapNotNull { part ->
+            val kind = Kind.entries.firstOrNull { it.name == part.getOrNull(0) } ?: return@mapNotNull null
+            if (part.size == 3) StatsFilter(kind, part[1], part[2]) else null
+        }
+    }
+}
+
+/**
+ * The Analytics tab's numbers with [filters] picked, one of each [Kind] at most. The tiles
+ * show [shown], the videos matching every filter. Each card shows [forCard]: the videos
+ * matching every filter but its own, so it still lists what else could be picked in it, with
+ * its pick marked. A channel, topic or category picked is listed even when it isn't among the
+ * top ones.
+ */
+class Analytics internal constructor(
+    val filters: List<StatsFilter>,
+    /** The whole history. */
+    val all: WatchStats,
+    val shown: WatchStats,
+    private val cards: Map<Kind, WatchStats>,
+    /** From the watch log: how you sit down to watch, with the videos shown; null before anything's recorded. */
+    val sittings: SittingStats?,
+    /** Subscriptions you haven't watched in a while ([unwatchedSubscriptions]); null when it's too early to tell. */
+    val unwatchedSubscriptions: List<Channel>?,
+) {
+    fun forCard(kind: Kind): WatchStats = cards[kind] ?: shown
+
+    /** What's picked in the card for [kind], if anything. */
+    fun picked(kind: Kind): StatsFilter? = filters.firstOrNull { it.kind == kind }
+}
+
+fun analytics(
+    history: Collection<WatchEntry>,
+    filters: List<StatsFilter>,
+    now: Long,
+    zone: ZoneId = ZoneId.systemDefault(),
+    subscriptions: List<Channel> = emptyList(),
+    spans: List<WatchSpan> = emptyList(),
+): Analytics {
+    val firstDay = firstDayOf(now, zone)
+    val subscribed = subscriptions.mapTo(HashSet()) { it.url }
+    val spansOf = spans.groupBy { it.videoId }
+    val facts = history.map { e -> Facts(e, zone, subscribed, spansOf) }
+    val tests = filters.map { it to it.test() }
+    fun matching(except: StatsFilter?) = facts.filter { f -> tests.all { (filter, test) -> filter == except || test(f) } }
+    val all = statsOf(facts, firstDay, subscribed)
+    val shownFacts = if (filters.isEmpty()) facts else matching(except = null)
+    val shown = if (filters.isEmpty()) all else statsOf(shownFacts, firstDay, subscribed)
+    val cards = filters.associate { own -> own.kind to statsOf(matching(except = own), firstDay, subscribed, keep = own) }
+    // The sittings of the videos shown: everything recorded, when nothing's picked.
+    val shownIds = shownFacts.mapNotNullTo(HashSet()) { it.id }
+    val sittings = sittingStats(if (filters.isEmpty()) spans else spans.filter { it.videoId in shownIds }, now, zone)
+    return Analytics(filters, all, shown, cards, sittings, unwatchedSubscriptions(subscriptions, history, spans, now))
+}
+
+fun watchStats(history: Collection<WatchEntry>, now: Long, zone: ZoneId = ZoneId.systemDefault()): WatchStats =
+    statsOf(history.map { Facts(it, zone, emptySet(), emptyMap()) }, firstDayOf(now, zone), emptySet())
+
+/** The first of the [WatchStats.DAYS] days the tab shows, today last. */
+private fun firstDayOf(now: Long, zone: ZoneId): LocalDate =
+    Instant.ofEpochMilli(now).atZone(zone).toLocalDate().minusDays(WatchStats.DAYS - 1L)
+
+/** Not watched for this long, a subscription counts as no longer watched. */
+private const val UNWATCHED_DAYS = 90L
+private const val DAY_MS = 24 * 60 * 60 * 1000L
+
+/**
+ * The subscriptions you haven't watched anything from in [UNWATCHED_DAYS] days (and that you
+ * subscribed to longer ago than that), A–Z. Null when the history doesn't go back that far:
+ * then it can't tell.
+ */
+fun unwatchedSubscriptions(
+    subscriptions: List<Channel>,
+    history: Collection<WatchEntry>,
+    spans: List<WatchSpan>,
+    now: Long,
+): List<Channel>? {
+    val window = UNWATCHED_DAYS * DAY_MS
+    val oldest = minOf(history.minOfOrNull { it.lastWatchedAt } ?: Long.MAX_VALUE, spans.minOfOrNull { it.startedAt } ?: Long.MAX_VALUE)
+    if (oldest == Long.MAX_VALUE || now - oldest < window) return null
+    val watched = HashSet<String>()
+    history.forEach { e -> if (now - e.lastWatchedAt <= window) e.video.channelUrl?.let(watched::add) }
+    spans.forEach { s -> if (now - s.startedAt <= window) watched += s.channel }
+    return subscriptions.filter { now - it.subscribedAt > window && it.url !in watched }.sortedBy { it.name.lowercase() }
+}
+
+/** A history entry with what the Analytics tab counts, groups and filters it by, worked out once. */
+private class Facts(val entry: WatchEntry, zone: ZoneId, subscribedUrls: Set<String>, spansOf: Map<String, List<WatchSpan>>) {
+    val id = videoIdOf(entry.video.url)
+    val watchedMs = entry.watchedMs()
+    private val at = Instant.ofEpochMilli(entry.lastWatchedAt).atZone(zone)
+    val day = at.toLocalDate().toEpochDay()
+    val hour = at.hour
+    val completion = entry.completion()
+    val channel = entry.channelKey()
+    val subscribed = entry.video.channelUrl?.let { it in subscribedUrls } == true
+    val length = lengthOf(entry.durationMs)
+
+    /** (key, how it's written) of each of its topics. */
+    val topics = topicsOf(entry)
+
+    private val spans = id?.let(spansOf::get).orEmpty()
+
+    /** Where it was first opened from, when that's recorded. */
+    val source = spans.filter { it.source != null }.minByOrNull { it.startedAt }?.source
+
+    /** How old it was when you first watched it (the watch log knows, else the history's last time). */
+    val ageMs: Long? = entry.video.uploadedAtMs.takeIf { it > 0 }?.let { uploaded ->
+        val first = minOf(spans.minOfOrNull { it.startedAt } ?: Long.MAX_VALUE, entry.lastWatchedAt)
+        (first - uploaded).coerceAtLeast(0)
+    }
+    val age = ageMs?.let(::ageOf) ?: -1
+}
+
+/** An index of [WatchStats.LENGTH_LABELS], or -1 when the length isn't known. */
+internal fun lengthOf(durationMs: Long): Int = when {
+    durationMs <= 0 -> -1
+    durationMs < 5 * 60_000 -> 0
+    durationMs < 20 * 60_000 -> 1
+    durationMs < 60 * 60_000 -> 2
+    else -> 3
+}
+
+/** An index of [WatchStats.AGE_LABELS]. */
+internal fun ageOf(ageMs: Long): Int = when {
+    ageMs < DAY_MS -> 0
+    ageMs < 7 * DAY_MS -> 1
+    ageMs < 30 * DAY_MS -> 2
+    ageMs < 365 * DAY_MS -> 3
+    else -> 4
+}
+
+/** Whether a video is one this filter picks. */
+private fun StatsFilter.test(): (Facts) -> Boolean {
+    val number = key.toLongOrNull()
+    return when (kind) {
+        Kind.Day -> { f -> f.day == number }
+        Kind.Hour -> { f -> f.hour.toLong() == number }
+        Kind.Channel -> { f -> f.channel == key }
+        Kind.Subscribed -> { f -> f.subscribed == (key == StatsFilter.SUBSCRIBED) }
+        Kind.Completion -> { f -> f.completion.toLong() == number }
+        Kind.Length -> { f -> f.length.toLong() == number }
+        Kind.Source -> { f -> f.source?.name == key }
+        Kind.Age -> { f -> f.age.toLong() == number }
+        Kind.Topic -> { f -> f.topics.any { it.first == key } }
+        Kind.Category -> { f -> f.entry.category == key }
+        Kind.Skipped -> { f -> f.entry.skipped.any { it.category == key } }
+    }
+}
+
+/** The numbers for [facts]; [keep] is what the card they're for has picked, listed even if it's not among the top. */
+private fun statsOf(facts: List<Facts>, firstDay: LocalDate, subscribed: Set<String>, keep: StatsFilter? = null): WatchStats {
     val perDay = LongArray(WatchStats.DAYS)
+    val videosPerDay = IntArray(WatchStats.DAYS)
     val byHour = LongArray(24)
     val completion = IntArray(4)
     val channels = HashMap<String, ChannelTime>()
+    val lengthMs = LongArray(WatchStats.LENGTH_LABELS.size)
+    val lengthVideos = IntArray(WatchStats.LENGTH_LABELS.size)
+    val lengthFinished = IntArray(WatchStats.LENGTH_LABELS.size)
+    val ageMs = LongArray(WatchStats.AGE_LABELS.size)
+    val ageVideos = IntArray(WatchStats.AGE_LABELS.size)
+    val sources = HashMap<OpenSource, Share>()
+    val first = firstDay.toEpochDay()
 
-    history.forEach { e ->
-        val watched = e.positionMs.coerceIn(0, e.durationMs.takeIf { it > 0 } ?: e.positionMs)
-        val at = Instant.ofEpochMilli(e.lastWatchedAt).atZone(zone)
-        val day = (at.toLocalDate().toEpochDay() - firstDay.toEpochDay()).toInt()
-        if (day in perDay.indices) perDay[day] += watched
-        byHour[at.hour] += watched
-
-        completion[
-            when {
-                e.isWatched -> 0
-                e.fraction >= 0.5f -> 1
-                e.fraction >= 0.1f -> 2
-                else -> 3
-            },
-        ]++
-
-        val key = e.channelKey()
-        val old = channels[key]
-        channels[key] = ChannelTime(
-            key = key,
-            name = e.video.uploader.ifBlank { "Unknown channel" },
-            url = e.video.channelUrl,
-            watchedMs = (old?.watchedMs ?: 0) + watched,
+    facts.forEach { f ->
+        val day = f.day - first
+        if (day >= 0 && day < WatchStats.DAYS) {
+            perDay[day.toInt()] += f.watchedMs
+            videosPerDay[day.toInt()]++
+        }
+        byHour[f.hour] += f.watchedMs
+        completion[f.completion]++
+        val old = channels[f.channel]
+        channels[f.channel] = ChannelTime(
+            key = f.channel,
+            name = f.entry.video.uploader.ifBlank { "Unknown channel" },
+            url = f.entry.video.channelUrl,
+            watchedMs = (old?.watchedMs ?: 0) + f.watchedMs,
             videos = (old?.videos ?: 0) + 1,
         )
+        if (f.length >= 0) {
+            lengthMs[f.length] += f.watchedMs
+            lengthVideos[f.length]++
+            if (f.completion == 0) lengthFinished[f.length]++
+        }
+        if (f.age >= 0) {
+            ageMs[f.age] += f.watchedMs
+            ageVideos[f.age]++
+        }
+        f.source?.let { s -> sources[s] = (sources[s] ?: Share(0, 0)).let { Share(it.watchedMs + f.watchedMs, it.videos + 1) } }
     }
 
+    fun kept(kind: Kind) = keep?.takeIf { it.kind == kind }?.key
+    val keptChannel = kept(Kind.Channel)
+    val keptCategory = kept(Kind.Category)
+    val keptTopic = kept(Kind.Topic)
+    val skips = skipsOf(facts)
+    fun share(of: List<Facts>) = Share(of.sumOf { it.watchedMs }, of.size)
+    val (fromSubscribed, fromOthers) = facts.partition { it.subscribed }
+    // The last 7 days are the last 7 of the [DAYS]; the 7 before, the 7 before those.
+    fun week(from: Int) = Share((from until from + 7).sumOf { perDay[it] }, (from until from + 7).sumOf { videosPerDay[it] })
+    val ages = facts.mapNotNull { it.ageMs }.sorted()
     return WatchStats(
-        videos = history.size,
-        watchedMs = history.sumOf { it.positionMs.coerceIn(0, it.durationMs.takeIf { d -> d > 0 } ?: it.positionMs) },
+        videos = facts.size,
+        watchedMs = facts.sumOf { it.watchedMs },
         channels = channels.size,
-        finishedShare = if (history.isEmpty()) 0f else completion[0].toFloat() / history.size,
+        finishedShare = if (facts.isEmpty()) 0f else completion[0].toFloat() / facts.size,
         perDay = perDay.toList(),
         firstDay = firstDay,
-        topChannels = channels.values.sortedByDescending { it.watchedMs }.take(WatchStats.TOP_CHANNELS),
+        thisWeek = week(WatchStats.DAYS - 7),
+        lastWeek = week(WatchStats.DAYS - 14),
+        topChannels = channels.values.sortedByDescending { it.watchedMs }
+            .topWith(WatchStats.TOP_CHANNELS) { it.key == keptChannel },
+        subscribed = share(fromSubscribed),
+        notSubscribed = share(fromOthers),
+        unsubscribedChannels = channels.values
+            .filter { it.url != null && it.url !in subscribed }
+            .sortedByDescending { it.watchedMs }
+            .take(WatchStats.TOP_UNSUBSCRIBED),
         byHour = byHour.toList(),
         completion = completion.toList(),
-        categories = rank(history.mapNotNull { e -> e.category?.let { it to e } }.map { (c, e) -> Triple(c, c, e) })
-            .take(WatchStats.TOP_CATEGORIES),
-        withCategory = history.count { it.category != null },
-        topics = topTopics(history),
+        byLength = lengthMs.indices.map { LengthTime(lengthMs[it], lengthVideos[it], lengthFinished[it]) },
+        bySource = sources.map { (s, share) -> SourceTime(s, share.watchedMs, share.videos) }
+            .sortedWith(compareByDescending<SourceTime> { it.watchedMs }.thenBy { it.source.ordinal }),
+        withSource = facts.count { it.source != null },
+        byAge = ageMs.indices.map { Share(ageMs[it], ageVideos[it]) },
+        withAge = ages.size,
+        medianAgeMs = ages.getOrNull(ages.size / 2),
+        categories = rank(facts.mapNotNull { f -> f.entry.category?.let { Triple(it, it, f.watchedMs) } })
+            .topWith(WatchStats.TOP_CATEGORIES) { it.key == keptCategory },
+        withCategory = facts.count { it.entry.category != null },
+        topics = rank(facts.flatMap { f -> f.topics.map { (key, shown) -> Triple(key, shown, f.watchedMs) } })
+            .filter { it.videos >= WatchStats.MIN_TOPIC_VIDEOS || it.key == keptTopic }
+            .topWith(WatchStats.TOP_TOPICS) { it.key == keptTopic },
+        skips = skips,
+        skippedMs = skips.sumOf { it.skippedMs },
+        skippedSegments = skips.sumOf { it.segments },
+        videosWithSkips = facts.count { it.entry.skipped.isNotEmpty() },
     )
+}
+
+/** What SponsorBlock skipped in [facts], by kind, the most time first. */
+private fun skipsOf(facts: List<Facts>): List<SkipTime> {
+    class Total(var ms: Long = 0, var segments: Int = 0, var videos: Int = 0)
+    val totals = HashMap<String, Total>()
+    facts.forEach { f ->
+        f.entry.skipped.groupBy { it.category }.forEach { (category, segments) ->
+            val t = totals.getOrPut(category) { Total() }
+            t.ms += segments.sumOf { it.skippedMs }
+            t.segments += segments.size
+            t.videos++
+        }
+    }
+    return totals.map { (category, t) -> SkipTime(category, t.ms, t.segments, t.videos) }
+        .sortedWith(compareByDescending<SkipTime> { it.skippedMs }.thenBy { it.category })
+}
+
+/** The first [n], then the one [isKept] picks if it's further down. */
+private fun <T> List<T>.topWith(n: Int, isKept: (T) -> Boolean): List<T> {
+    val top = take(n)
+    if (top.any(isKept)) return top
+    return top + (drop(n).firstOrNull(isKept) ?: return top)
 }
 
 /**
  * Which channel a watched video is from: its link, or for videos saved without one, its
  * name. The Analytics tab groups, and filters, by it.
  */
-fun WatchEntry.channelKey(): String =
-    video.channelUrl ?: "name:${video.uploader.ifBlank { "Unknown channel" }}"
+fun WatchEntry.channelKey(): String = video.channelKey()
+
+/** Which channel a video is from, the same way as [WatchEntry.channelKey]. */
+fun VideoItem.channelKey(): String = channelUrl ?: "$NAME_KEY${uploader.ifBlank { "Unknown channel" }}"
+
+/** The channel's link in a [channelKey], or null for a channel known only by its name. */
+fun channelUrlOfKey(key: String): String? = key.takeUnless { it.startsWith(NAME_KEY) }
+
+private const val NAME_KEY = "name:"
+
+/** How far into it you got, as an index of [WatchStats.COMPLETION_LABELS]. */
+internal fun WatchEntry.completion(): Int = when {
+    isWatched -> 0
+    fraction >= 0.5f -> 1
+    fraction >= 0.1f -> 2
+    else -> 3
+}
 
 /** Watched time of an entry: how far in it got, never past the end. */
 private fun WatchEntry.watchedMs(): Long = positionMs.coerceIn(0, durationMs.takeIf { it > 0 } ?: positionMs)
 
 /**
- * Totals per key, most watched first. Each item is (key, how it's shown, entry); the name
- * shown is the most common way it was written.
+ * Totals per key, most watched first. Each item is (key, how it's written, watch time); a key
+ * is shown the way it's written most often.
  */
-private fun rank(items: List<Triple<String, String, WatchEntry>>): List<TopicTime> {
+private fun rank(items: List<Triple<String, String, Long>>): List<TopicTime> {
     class Total(var ms: Long = 0, var videos: Int = 0, val spellings: HashMap<String, Int> = HashMap())
     val totals = LinkedHashMap<String, Total>()
-    items.forEach { (key, shown, e) ->
+    items.forEach { (key, shown, ms) ->
         val t = totals.getOrPut(key) { Total() }
-        t.ms += e.watchedMs()
+        t.ms += ms
         t.videos++
         t.spellings.merge(shown, 1, Int::plus)
     }
-    return totals.values
-        .map { t -> TopicTime(t.spellings.maxBy { it.value }.key, t.ms, t.videos) }
+    return totals.map { (key, t) -> TopicTime(key, t.spellings.maxBy { it.value }.key, t.ms, t.videos) }
         .sortedWith(compareByDescending<TopicTime> { it.watchedMs }.thenByDescending { it.videos })
 }
-
-private fun topTopics(history: Collection<WatchEntry>): List<TopicTime> =
-    rank(history.flatMap { e -> topicsOf(e).map { (key, shown) -> Triple(key, shown, e) } })
-        .filter { it.videos >= WatchStats.MIN_TOPIC_VIDEOS }
-        .take(WatchStats.TOP_TOPICS)
 
 /**
  * What a video is about, as (key, how it's written): the words of its title and its short

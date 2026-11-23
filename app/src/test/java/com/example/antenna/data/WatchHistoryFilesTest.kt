@@ -15,7 +15,7 @@ class WatchHistoryFilesTest {
 
     private fun history() = mapOf(
         id(1) to watched(video(1), fraction = 0.5, related = listOf(video(10), video(11)))
-            .copy(category = "Music", tags = listOf("synth", "80s")),
+            .copy(category = "Music", tags = listOf("synth", "80s"), skipped = listOf(SkippedSegment("sponsor", 12_000, 45_000))),
         id(2) to watched(video(2), fraction = 1.0, daysAgo = 1.0),
     )
 
@@ -69,6 +69,17 @@ class WatchHistoryFilesTest {
         val read = decodeHistory(arr.toString(), related = "not json")
         assertEquals(2, read.entries.size)
         assertEquals(2, read.skipped)
+    }
+
+    @Test
+    fun `older entries have no skips, and a skip that can't be read is left out`() {
+        val arr = JSONArray(encodeHistory(history()))
+        val withSkips = (0 until arr.length()).map { arr.getJSONObject(it) }.single { it.has("skips") }
+        assertEquals(1, (0 until arr.length()).count { arr.getJSONObject(it).has("skips") }) // none written for none
+        withSkips.getJSONArray("skips").put("not a skip").put(JSONObject().put("start", 5))
+        val read = decodeHistory(arr.toString(), related = null)
+        assertEquals(listOf(SkippedSegment("sponsor", 12_000, 45_000)), read.entries.getValue(id(1)).skipped)
+        assertEquals(emptyList<SkippedSegment>(), read.entries.getValue(id(2)).skipped)
     }
 
     @Test(expected = Exception::class)

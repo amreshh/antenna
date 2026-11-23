@@ -18,6 +18,8 @@
 # (generous ones, for an emulator: they catch big regressions, not small ones):
 #   STARTUP_BUDGET_MS  median cold start of 5, from launch to first frame (4000)
 #   MEMORY_BUDGET_MB   memory (PSS) with a video loaded (400)
+# and reports how long the video took to start playing, without a budget: that
+# depends on YouTube's servers more than on the app.
 set -uo pipefail
 
 apk=${APK:?set APK to the APK to test}
@@ -154,6 +156,12 @@ player() {
       fi
       screenshot player
       note="it loaded and plays “$title”"
+      # How long it took to start playing, as the player logs it (logStart in
+      # PlayerViewModel.kt): fetching the video's details and links, then buffering.
+      local start
+      start=$("$adb" logcat -d -s Player:I | tr -d '\r' |
+        sed -n 's/.*Playing after \([0-9]*\) ms (details \([0-9]*\) ms, buffering \([0-9]*\) ms.*/\1 ms (details \2 ms, buffering \3 ms)/p' | tail -1)
+      [ -n "$start" ] && perf+=("| Video start, link to playing | $start | none: it depends on YouTube's servers |")
       return 0
     fi
     if [ -n "$error" ]; then

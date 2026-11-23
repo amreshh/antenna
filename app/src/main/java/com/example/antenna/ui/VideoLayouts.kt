@@ -259,22 +259,82 @@ internal fun VideoThumbnail(item: VideoItem, entry: WatchEntry?, modifier: Modif
                     .padding(horizontal = 4.dp, vertical = 1.dp),
             )
         }
-        if (entry != null && entry.fraction > 0.01f) {
-            Box(
-                Modifier
-                    .align(Alignment.BottomStart)
-                    .fillMaxWidth()
-                    .height(3.dp)
-                    .background(Color.Gray.copy(alpha = 0.6f)),
-            ) {
-                Box(
-                    Modifier
-                        .fillMaxHeight()
-                        .fillMaxWidth(if (entry.isWatched) 1f else entry.fraction)
-                        .background(Color.Red),
-                )
-            }
+        WatchProgress(entry, Modifier.align(Alignment.BottomStart))
+    }
+}
+
+/** The red bar along a thumbnail's bottom: how far into the video you got, like YouTube's. */
+@Composable
+private fun WatchProgress(entry: WatchEntry?, modifier: Modifier) {
+    if (entry == null || entry.fraction <= 0.01f) return
+    Box(
+        modifier
+            .fillMaxWidth()
+            .height(3.dp)
+            .background(Color.Gray.copy(alpha = 0.6f)),
+    ) {
+        Box(
+            Modifier
+                .fillMaxHeight()
+                .fillMaxWidth(if (entry.isWatched) 1f else entry.fraction)
+                .background(Color.Red),
+        )
+    }
+}
+
+/** Shorts: a grid of tall cards, three across on most phones and more on bigger screens. */
+@Composable
+internal fun ShortsGrid(modifier: Modifier = Modifier, content: LazyGridScope.() -> Unit) {
+    LazyVerticalGrid(
+        columns = GridCells.Adaptive(minSize = 110.dp),
+        modifier = modifier,
+        contentPadding = PaddingValues(16.dp),
+        horizontalArrangement = Arrangement.spacedBy(12.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp),
+        content = content,
+    )
+}
+
+internal fun LazyGridScope.shortItems(items: List<VideoItem>, onClick: (VideoItem) -> Unit) =
+    items(items, key = { it.url }) { item -> ShortCard(item, onClick = { onClick(item) }) }
+
+/**
+ * A Short: its thumbnail, tall like the video, then the title and channel. The feed's
+ * thumbnail is 4:3 with the video upright in the middle; cut to 9:16, it's just the video.
+ */
+@Composable
+internal fun ShortCard(item: VideoItem, onClick: () -> Unit) {
+    val entry = rememberHistoryEntry(item)
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick),
+    ) {
+        Box(Modifier.fillMaxWidth().aspectRatio(9f / 16f).clip(RoundedCornerShape(12.dp))) {
+            AsyncImage(
+                model = item.thumbnailUrl,
+                contentDescription = null,
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.fillMaxSize().background(MaterialTheme.colorScheme.surfaceVariant),
+            )
+            WatchProgress(entry, Modifier.align(Alignment.BottomStart))
         }
+        Text(
+            item.title,
+            style = MaterialTheme.typography.titleSmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(start = 2.dp, end = 2.dp, top = 6.dp),
+        )
+        Text(
+            listOf(item.uploader, item.ageLabel()).filter { it.isNotBlank() }.joinToString(" · "),
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(horizontal = 2.dp),
+        )
     }
 }
 

@@ -15,7 +15,11 @@ import androidx.lifecycle.viewModelScope
 import com.example.antenna.data.Channel
 import com.example.antenna.data.FeedCache
 import com.example.antenna.data.FeedRepository
+import com.example.antenna.data.GuessReason
+import com.example.antenna.data.Prefetcher
 import com.example.antenna.data.SubscriptionStore
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.exportTakeoutCsv
 import com.example.antenna.data.parseTakeoutCsv
@@ -90,6 +94,10 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
             }
             // Keep the feed in sync when you subscribe/unsubscribe anywhere in the app.
             store.channels.collect { sync(it) }
+        }
+        // The newest uploads are likely taps: guesses for Prefetcher.
+        viewModelScope.launch {
+            _state.map { it.items }.distinctUntilChanged().collect { Prefetcher.get(app).shows(GuessReason.NewUpload, it) }
         }
     }
 
