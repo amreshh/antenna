@@ -1,5 +1,18 @@
 package com.example.antenna.ui
 
+import android.widget.Toast
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.materialIcon
+import androidx.compose.material.icons.materialPath
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.vector.ImageVector
+import com.example.antenna.data.WatchLaterStore
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -31,8 +44,8 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -47,19 +60,20 @@ import com.example.antenna.data.formatDuration
 import com.example.antenna.data.videoIdOf
 
 /**
- * Window-size helpers (Material's breakpoints). They read the current window, so they
- * also react to split-screen and foldables, not just "is this a tablet".
+ * Window-size helpers (Material's breakpoints). They read the app's window (its bounds, as
+ * Material's window size classes measure them), so they also react to split-screen,
+ * freeform windows and foldables, not just "is this a tablet".
  */
 @Composable
-internal fun isWideWindow(): Boolean = LocalConfiguration.current.screenWidthDp >= 600
+internal fun isWideWindow(): Boolean = LocalWindowInfo.current.containerDpSize.width >= 600.dp
 
 /** Expanded width (tablet landscape, big foldables): room for a second column next to the video. */
 @Composable
-internal fun isExpandedWindow(): Boolean = LocalConfiguration.current.screenWidthDp >= 840
+internal fun isExpandedWindow(): Boolean = LocalWindowInfo.current.containerDpSize.width >= 840.dp
 
 /** A phone held sideways: too short for anything but the video. */
 @Composable
-internal fun isShortWindow(): Boolean = LocalConfiguration.current.screenHeightDp < 480
+internal fun isShortWindow(): Boolean = LocalWindowInfo.current.containerDpSize.height < 480.dp
 
 /**
  * The video list used by every tab: one column of rows on phones, a grid of
@@ -83,7 +97,8 @@ internal fun LazyGridScope.fullWidthItem(key: Any? = null, content: @Composable 
 
 /**
  * With [onChannelClick], each video shows its channel's avatar (when its channel is known),
- * and tapping the avatar opens the channel.
+ * and tapping the avatar opens the channel. Without a [trailing] of its own, each video gets
+ * the ⋮ menu ([VideoMenu]).
  */
 internal fun LazyGridScope.videoItems(
     items: List<VideoItem>,
@@ -92,11 +107,65 @@ internal fun LazyGridScope.videoItems(
     trailing: (@Composable (VideoItem) -> Unit)? = null,
     onChannelClick: ((Channel) -> Unit)? = null,
 ) = items(items, key = { it.url }) { item ->
-    val tail: (@Composable () -> Unit)? = trailing?.let { t -> { t(item) } }
+    val tail: @Composable () -> Unit = trailing?.let { t -> { t(item) } } ?: { VideoMenu(item) }
     val channel = item.channelUrl?.let { url -> Channel(url, item.uploader, item.channelAvatarUrl) }
     val openChannel: (() -> Unit)? = onChannelClick?.let { open -> channel?.let { c -> { open(c) } } }
     if (wide) VideoCard(item, onClick = { onClick(item) }, trailing = tail, onChannelClick = openChannel)
     else VideoRow(item, onClick = { onClick(item) }, trailing = tail, onChannelClick = openChannel)
+}
+
+/** ⋮ on a video: save it to Watch later, or take it off. */
+@Composable
+internal fun VideoMenu(item: VideoItem) {
+    val context = LocalContext.current
+    val watchLater = remember(context) { WatchLaterStore.get(context) }
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) {
+            Icon(Icons.Default.MoreVert, contentDescription = "More options")
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            val saved = remember { watchLater.contains(item.url) }
+            DropdownMenuItem(
+                text = { Text(if (saved) "Remove from Watch later" else "Save to Watch later") },
+                leadingIcon = { Icon(if (saved) BookmarkIcon else BookmarkBorderIcon, contentDescription = null) },
+                onClick = {
+                    open = false
+                    val now = watchLater.toggle(item)
+                    Toast.makeText(context, if (now) "Saved to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
+                },
+            )
+        }
+    }
+}
+
+/** Material's "bookmark" icons (the core icon set doesn't have them): saved, and not. */
+internal val BookmarkIcon: ImageVector by lazy {
+    materialIcon(name = "Filled.Bookmark") {
+        materialPath {
+            moveTo(17f, 3f); horizontalLineTo(7f)
+            curveToRelative(-1.1f, 0f, -1.99f, 0.9f, -1.99f, 2f)
+            lineTo(5f, 21f); lineToRelative(7f, -3f); lineToRelative(7f, 3f)
+            verticalLineTo(5f)
+            curveToRelative(0f, -1.1f, -0.9f, -2f, -2f, -2f)
+            close()
+        }
+    }
+}
+
+internal val BookmarkBorderIcon: ImageVector by lazy {
+    materialIcon(name = "Filled.BookmarkBorder") {
+        materialPath {
+            moveTo(17f, 3f); horizontalLineTo(7f)
+            curveToRelative(-1.1f, 0f, -1.99f, 0.9f, -1.99f, 2f)
+            lineTo(5f, 21f); lineToRelative(7f, -3f); lineToRelative(7f, 3f)
+            verticalLineTo(5f)
+            curveToRelative(0f, -1.1f, -0.9f, -2f, -2f, -2f)
+            close()
+            moveTo(17f, 18f); lineToRelative(-5f, -2.18f); lineTo(7f, 18f); verticalLineTo(5f); horizontalLineToRelative(10f); verticalLineToRelative(13f)
+            close()
+        }
+    }
 }
 
 /** On a video's channel avatar (or channel line) that opens the channel: for the smoke test. */

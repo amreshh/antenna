@@ -5,6 +5,7 @@ import android.net.Uri
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.antenna.data.Channel
+import com.example.antenna.data.FeedCache
 import com.example.antenna.data.FeedRepository
 import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.VideoItem
@@ -45,7 +46,20 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     private var loaded = emptySet<String>()
     private var job: Job? = null
 
+    private val cache = FeedCache(app)
+
+    /** Whether a fresh feed has loaded; from then on the cached one isn't shown. */
+    private var fresh = false
+
     init {
+        // The feed as it last loaded, straight away, while a fresh one loads; only for the
+        // channels you're still subscribed to.
+        viewModelScope.launch {
+            val cached = cache.read() ?: return@launch
+            if (fresh) return@launch
+            val current = store.channels.value.mapTo(HashSet()) { it.url }
+            _state.update { it.copy(items = cached.filter { v -> v.channelUrl in current }) }
+        }
         refresh()
         // Keep the feed in sync when you subscribe/unsubscribe anywhere in the app.
         viewModelScope.launch { store.channels.collect { sync(it) } }
@@ -131,6 +145,9 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
                         failedChannels = result.failedChannels,
                     )
                 }
+                fresh = true
+                val items = _state.value.items
+                launch { cache.write(items) }
                 // catch subscriptions that changed while we were loading
                 sync(store.channels.value)
             } catch (e: CancellationException) {

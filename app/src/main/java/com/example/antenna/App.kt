@@ -7,6 +7,7 @@ import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.WatchHistoryStore
+import com.example.antenna.data.WatchLaterStore
 import com.example.antenna.net.OkHttpDownloader
 import okhttp3.OkHttpClient
 import org.schabi.newpipe.extractor.NewPipe
@@ -33,6 +34,7 @@ class App : Application(), SingletonImageLoader.Factory {
         thread(name = "load-stores") {
             WatchHistoryStore.get(this)
             SubscriptionStore.get(this)
+            WatchLaterStore.get(this)
         }
     }
 

@@ -31,6 +31,7 @@ import com.example.antenna.data.Recommender
 import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.WatchHistoryStore
+import com.example.antenna.data.WatchLaterStore
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
@@ -117,6 +118,35 @@ fun ForYouTab(vm: ForYouViewModel, onOpenVideo: (String) -> Unit, modifier: Modi
                 videoItems(items, wide, onClick = { onOpenVideo(it.url) })
             }
         }
+    }
+}
+
+/** Watch later tab: the videos you saved, newest first; ✕ takes one off. */
+@Composable
+fun WatchLaterTab(onOpenVideo: (String) -> Unit, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val store = remember(context) { WatchLaterStore.get(context) }
+    val videos by store.videos.collectAsStateWithLifecycle()
+
+    if (videos.isEmpty()) {
+        EmptyMessage(
+            "Nothing saved yet",
+            "Save videos to watch later from the ⋮ menu on any video, or with Watch later under the one you're watching.",
+            modifier,
+        )
+        return
+    }
+    VideoGrid(modifier) { wide ->
+        videoItems(
+            videos,
+            wide,
+            onClick = { onOpenVideo(it.url) },
+            trailing = { video ->
+                IconButton(onClick = { store.remove(video.url) }) {
+                    Icon(Icons.Default.Close, contentDescription = "Remove from Watch later")
+                }
+            },
+        )
     }
 }
 

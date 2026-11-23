@@ -216,7 +216,8 @@ fun youtubeVideoId(url: String): String? =
 /** The canonical link to a video. */
 fun watchUrl(videoId: String): String = "https://www.youtube.com/watch?v=$videoId"
 
-private fun VideoItem.toJson(): JSONObject = JSONObject()
+/** A video as JSON, for the files and preferences the app keeps (history, Watch later, the feed). */
+internal fun VideoItem.toJson(): JSONObject = JSONObject()
     .put("url", url)
     .put("title", title)
     .put("uploader", uploader)
@@ -225,8 +226,9 @@ private fun VideoItem.toJson(): JSONObject = JSONObject()
     .put("uploadedAt", uploadedAtMs)
     .put("uploadedText", uploadedText ?: JSONObject.NULL)
     .put("channelUrl", channelUrl ?: JSONObject.NULL)
+    .put("avatar", channelAvatarUrl ?: JSONObject.NULL)
 
-private fun videoFromJson(o: JSONObject) = VideoItem(
+internal fun videoFromJson(o: JSONObject) = VideoItem(
     url = o.getString("url"),
     title = o.optString("title"),
     uploader = o.optString("uploader"),
@@ -235,7 +237,9 @@ private fun videoFromJson(o: JSONObject) = VideoItem(
     uploadedAtMs = o.optLong("uploadedAt"),
     uploadedText = o.optStringOrNull("uploadedText"),
     channelUrl = o.optStringOrNull("channelUrl"),
+    channelAvatarUrl = o.optStringOrNull("avatar"),
 )
 
+/** The string at [key], or null when it's missing or null (older files lack newer keys). */
 private fun JSONObject.optStringOrNull(key: String): String? =
     if (isNull(key)) null else optString(key)

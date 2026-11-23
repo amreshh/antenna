@@ -6,16 +6,30 @@ plugins {
 
 android {
     namespace = "com.example.antenna"
-    compileSdk = 37
+    // Android 17 QPR2 (API 37.2): Compose 1.13 needs at least 37.1 to compile against.
+    compileSdk {
+        version = release(37) { minorApiLevel = 2 }
+    }
 
     defaultConfig {
         applicationId = "com.example.antenna"
         minSdk = 26
-        targetSdk = 35
+        // Android 16: edge-to-edge (done in MainActivity), predictive back (BackHandler
+        // supports it), and on large screens no orientation lock (the app only locks
+        // landscape for fullscreen on phones). Not 37 yet: targeting Android 17 made every
+        // video fail on the Android 17 emulator (ERROR_CODE_DECODING_FAILED: the decoder
+        // failed when ExoPlayer switched its output surface), while 36 plays fine there.
+        // Try 37 again on a real Android 17 phone, then drop the lint exception below.
+        targetSdk = 36
         // The first release's version. After that, CI passes the release's version
         // (-PantennaVersion=1.2.3, from the git tag); see .github/workflows/ci.yaml.
         versionName = (findProperty("antennaVersion") as String?) ?: "0.1.0"
         versionCode = versionCodeOf(versionName!!)
+    }
+
+    lint {
+        // "Not targeting the latest Android": on purpose, see targetSdk above.
+        disable += "OldTargetApi"
     }
 
     // CI signs releases with the release key (repository secrets, see the README).
@@ -83,15 +97,15 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.11.1")
 
     // UI
-    implementation(platform("androidx.compose:compose-bom:2026.09.00"))
+    implementation(platform("androidx.compose:compose-bom:2026.11.01"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-core")
     implementation("androidx.activity:activity-compose:1.13.0")
-    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.0")
-    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.11.1")
+    implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.11.1")
     // collectAsStateWithLifecycle: screens in the background stop collecting (and recomputing)
-    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.0")
+    implementation("androidx.lifecycle:lifecycle-runtime-compose:2.11.1")
     // Images (thumbnails, avatars), fetched with the app's own OkHttp client (see App).
     implementation("io.coil-kt.coil3:coil-compose:3.6.3")
     implementation("io.coil-kt.coil3:coil-network-okhttp:3.6.3")
