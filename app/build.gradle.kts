@@ -122,6 +122,8 @@ dependencies {
 
     // Unit tests (app/src/test): plain JVM tests of the logic that doesn't need Android.
     testImplementation("junit:junit:4.13.2")
+    // Android's org.json is only a stub in JVM tests: the real one, for the files' format.
+    testImplementation("org.json:json:20260814")
 }
 
 /**

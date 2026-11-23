@@ -83,13 +83,15 @@ fun AnalyticsTab(onOpenChannel: (Channel) -> Unit, onSearch: (String) -> Unit, m
     val context = LocalContext.current
     val store = remember(context) { WatchHistoryStore.get(context) }
     val entries by store.entries.collectAsStateWithLifecycle()
+    val loaded by store.loaded.collectAsStateWithLifecycle()
     /** The picked channel's key (ChannelTime.key), or null for every channel. */
     var channelKey by rememberSaveable { mutableStateOf<String?>(null) }
     BackHandler(enabled = channelKey != null) { channelKey = null }
 
     // Worked out off the main thread: it goes through up to 1000 videos, and the history
     // changes every few seconds while a video plays.
-    val numbers by produceState<AnalyticsNumbers?>(null, entries, channelKey) {
+    val numbers by produceState<AnalyticsNumbers?>(null, entries, channelKey, loaded) {
+        if (!loaded) return@produceState // not "Nothing to show yet" while the history loads
         value = withContext(Dispatchers.Default) {
             val now = System.currentTimeMillis()
             val all = watchStats(entries.values, now)

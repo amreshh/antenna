@@ -66,16 +66,24 @@ class WatchLaterStore private constructor(context: Context) {
 
     private fun idsOf(list: List<VideoItem>): Set<String> = list.mapNotNullTo(HashSet()) { videoIdOf(it.url) }
 
+    /**
+     * A video that can't be read is skipped, not the whole list. A list that can't be read at
+     * all is kept aside (under [KEY_UNREADABLE]) before the next change would overwrite it.
+     */
     private fun load(): List<VideoItem> {
         val raw = sp.getString(KEY, null) ?: return emptyList()
-        return runCatching {
-            val arr = JSONArray(raw)
-            (0 until arr.length()).map { videoFromJson(arr.getJSONObject(it)) }
-        }.getOrDefault(emptyList())
+        val arr = try {
+            JSONArray(raw)
+        } catch (_: Exception) {
+            sp.edit { putString(KEY_UNREADABLE, raw) }
+            return emptyList()
+        }
+        return (0 until arr.length()).mapNotNull { runCatching { videoFromJson(arr.getJSONObject(it)) }.getOrNull() }
     }
 
     companion object {
         private const val KEY = "videos"
+        private const val KEY_UNREADABLE = "videos_unreadable"
         private const val MAX_VIDEOS = 1000
 
         @Volatile

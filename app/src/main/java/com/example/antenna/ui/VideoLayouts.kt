@@ -1,5 +1,7 @@
 package com.example.antenna.ui
 
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.distinctUntilChanged
 import android.widget.Toast
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
@@ -182,13 +184,20 @@ internal fun ChannelAvatar(url: String?, modifier: Modifier = Modifier) {
     )
 }
 
-/** Watch progress for a video, straight from the history store. */
+/**
+ * Watch progress for a video, straight from the history store. Each card follows only its
+ * own video's entry: while a video plays the history changes every few seconds, and the
+ * cards of every other video don't redraw for it.
+ */
 @Composable
 internal fun rememberHistoryEntry(item: VideoItem): WatchEntry? {
     val context = LocalContext.current
     val history = remember(context) { WatchHistoryStore.get(context) }
-    val entries by history.entries.collectAsStateWithLifecycle()
-    return remember(entries, item.url) { videoIdOf(item.url)?.let { entries[it] } }
+    val id = remember(item.url) { videoIdOf(item.url) }
+    val entry = remember(history, id) { history.entries.map { if (id == null) null else it[id] }.distinctUntilChanged() }
+    // Starting from the entry as it is now, so the progress bar is there from the first frame.
+    val now = remember(history, item.url) { history.entryFor(item.url) }
+    return entry.collectAsStateWithLifecycle(initialValue = now).value
 }
 
 /**

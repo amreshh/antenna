@@ -13,6 +13,9 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 
+/** The feed as saved: its videos, the channels they're from (urls), and when it was saved. */
+class CachedFeed(val items: List<VideoItem>, val channels: Set<String>, val savedAt: Long)
+
 /**
  * The Subscriptions feed as it last loaded, so the tab shows it straight away while a fresh
  * one loads. It's in the app's cache folder: Android may clear that when it needs room,
@@ -25,19 +28,26 @@ class FeedCache(context: Context) {
     private val writeLock = Mutex()
 
     /** The feed saved last, or null when there's none (or it can't be read). */
-    suspend fun read(): List<VideoItem>? = withContext(Dispatchers.IO) {
+    suspend fun read(): CachedFeed? = withContext(Dispatchers.IO) {
         runCatching {
             val o = JSONObject(String(file.readFully()))
             if (o.optInt("version") != VERSION) return@runCatching null
             val items = o.getJSONArray("items")
-            (0 until items.length()).map { videoFromJson(items.getJSONObject(it)) }
+            val channels = o.optJSONArray("channels") ?: JSONArray()
+            CachedFeed(
+                items = (0 until items.length()).map { videoFromJson(items.getJSONObject(it)) },
+                channels = (0 until channels.length()).mapTo(HashSet()) { channels.getString(it) },
+                savedAt = o.optLong("savedAt"), // 0 in older files: not fresh
+            )
         }.getOrNull()
     }
 
-    suspend fun write(items: List<VideoItem>) = withContext(Dispatchers.IO) {
+    suspend fun write(items: List<VideoItem>, channels: Set<String>) = withContext(Dispatchers.IO) {
         writeLock.withLock {
             val json = JSONObject()
                 .put("version", VERSION)
+                .put("savedAt", System.currentTimeMillis())
+                .put("channels", JSONArray(channels))
                 .put("items", JSONArray().apply { items.forEach { put(it.toJson()) } })
             var out: FileOutputStream? = null
             try {

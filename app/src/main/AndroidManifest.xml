@@ -3,6 +3,8 @@
     xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Whether the connection is metered (mobile data): the lower max quality there. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!--
     Media3 asks for this for ExoPlayer's wake mode (keeping the CPU awake while playing with
     the screen off). The app never turns that on: the screen stays on while a video plays,

@@ -1,5 +1,10 @@
 package com.example.antenna.ui
 
+import androidx.media3.exoplayer.DefaultLoadControl
+import android.net.ConnectivityManager
+import androidx.media3.exoplayer.source.MediaSource
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.Dispatchers
 import android.app.Application
 import android.net.Uri
 import android.widget.Toast
@@ -68,6 +73,10 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
 
         /** Fresh links per video before giving up and showing the error. */
         const val MAX_REFRESHES = 3
+
+        /** How far ahead the player buffers: it loads again below the first, and stops at the second. */
+        const val MIN_BUFFER_MS = 15_000
+        const val MAX_BUFFER_MS = 30_000
     }
 
     private val app get() = getApplication<Application>()
@@ -165,6 +174,18 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
             /* handleAudioFocus = */ true,
         )
         .setHandleAudioBecomingNoisy(true)
+        // Buffer 15-30 s ahead instead of Media3's 50 s: what's buffered is downloaded for
+        // nothing when you leave a video early (at 1080p, 50 s is some 15-30 MB).
+        .setLoadControl(
+            DefaultLoadControl.Builder()
+                .setBufferDurationsMs(
+                    MIN_BUFFER_MS,
+                    MAX_BUFFER_MS,
+                    DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_MS,
+                    DefaultLoadControl.DEFAULT_BUFFER_FOR_PLAYBACK_AFTER_REBUFFER_MS,
+                )
+                .build(),
+        )
         // No wake lock: the screen stays on while a video plays (keepScreenOn) and leaving
         // the app pauses it, so the CPU never needs keeping awake. (Media3 now asks for one
         // by default; the manifest removes its WAKE_LOCK permission.)
@@ -279,15 +300,37 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         val info = currentInfo ?: return
         if (quality == chosenQuality) return
         chosenQuality = quality
-        val player = player
-        val position = player.currentPosition
-        val play = player.playWhenReady
-        player.setMediaSource(
-            StreamPicker.build(info, maxHeight = quality ?: prefs.maxHeight, http = App.http, preferred = quality),
-            position,
-        )
-        player.prepare()
-        player.playWhenReady = play
+        refreshJob?.cancel()
+        refreshJob = viewModelScope.launch {
+            val (source, _) = pickStreams(info, quality)
+            if (info !== currentInfo) return@launch // another video opened meanwhile
+            val player = player
+            val play = player.playWhenReady
+            player.setMediaSource(source, player.currentPosition)
+            player.prepare()
+            player.playWhenReady = play
+        }
+    }
+
+    /**
+     * The media source for [info] in [chosen] quality (null: Auto, up to the Settings max),
+     * and the qualities it has. Off the main thread: it asks the device's decoders what they
+     * can play, which can take a while the first time.
+     */
+    private suspend fun pickStreams(info: StreamInfo, chosen: Int?): Pair<MediaSource, List<Int>> =
+        withContext(Dispatchers.Default) {
+            StreamPicker.build(info, maxHeight = chosen ?: autoMaxHeight(), http = App.http, preferred = chosen) to
+                StreamPicker.qualities(info)
+        }
+
+    /**
+     * The best quality Auto picks: the Settings max, or on mobile data (or another metered
+     * network) the lower mobile-data one, as the network is when the video opens.
+     */
+    private fun autoMaxHeight(): Int {
+        val metered = app.getSystemService(ConnectivityManager::class.java)?.isActiveNetworkMetered == true
+        val cap = prefs.maxHeightMetered
+        return if (metered && cap != Prefs.SAME_AS_WIFI) minOf(prefs.maxHeight, cap) else prefs.maxHeight
     }
 
     /**
@@ -329,15 +372,13 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         refreshJob?.cancel()
         refreshJob = viewModelScope.launch {
             try {
-                val info = YouTubeRepository.streamInfo(url)
+                val info = YouTubeRepository.streamInfo(url, fresh = true)
+                if (url != currentUrl) return@launch
+                val (source, available) = pickStreams(info, chosenQuality)
                 if (url != currentUrl) return@launch
                 currentInfo = info
-                qualities = StreamPicker.qualities(info)
-                val quality = chosenQuality?.takeIf { it in qualities }
-                player.setMediaSource(
-                    StreamPicker.build(info, maxHeight = quality ?: prefs.maxHeight, http = App.http, preferred = quality),
-                    position,
-                )
+                qualities = available
+                player.setMediaSource(source, position)
                 player.prepare()
                 player.playWhenReady = playWhenReady
             } catch (e: CancellationException) {
@@ -407,14 +448,16 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                 currentVideo = video
 
                 // Resume where you left off, unless you'd basically finished it.
+                history.awaitLoaded()
                 val previous = history.entryFor(url)
                 val startAt = previous
                     ?.takeIf { !it.isWatched && it.positionMs > RESUME_MIN_MS }
                     ?.positionMs ?: 0L
 
+                val (source, available) = pickStreams(info, chosen = null)
                 currentInfo = info
-                qualities = StreamPicker.qualities(info)
-                player.setMediaSource(StreamPicker.build(info, prefs.maxHeight, App.http), startAt)
+                qualities = available
+                player.setMediaSource(source, startAt)
                 player.prepare()
                 player.playWhenReady = autoplay
                 if (startAt > 0 && autoplay) toast("Resuming from ${formatDuration(startAt / 1000)}")

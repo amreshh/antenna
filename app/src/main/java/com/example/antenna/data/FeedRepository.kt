@@ -14,7 +14,12 @@ import org.schabi.newpipe.extractor.channel.tabs.ChannelTabs
 import org.schabi.newpipe.extractor.stream.StreamInfoItem
 import java.util.concurrent.atomic.AtomicInteger
 
-data class FeedResult(val items: List<VideoItem>, val failedChannels: List<String>)
+data class FeedResult(
+    val items: List<VideoItem>,
+    /** The names of the channels that couldn't be loaded, and their urls. */
+    val failedChannels: List<String>,
+    val failedUrls: Set<String> = emptySet(),
+)
 
 /**
  * Builds the subscription feed.
@@ -28,8 +33,14 @@ object FeedRepository {
     private const val PARALLEL_REQUESTS = 8
     private const val TAG = "Feed"
 
+    /**
+     * The newest uploads of [channels]. For those in [skipPageFor] (they failed lately, so
+     * likely gone) a failed RSS feed isn't followed by the channel's page: that's about
+     * 180 KB, against 8 KB for the feed.
+     */
     suspend fun fetch(
         channels: List<Channel>,
+        skipPageFor: Set<String> = emptySet(),
         onProgress: (done: Int, total: Int) -> Unit = { _, _ -> },
     ): FeedResult = coroutineScope {
         val gate = Semaphore(PARALLEL_REQUESTS)
@@ -38,7 +49,7 @@ object FeedRepository {
         val results = channels.map { channel ->
             async(Dispatchers.IO) {
                 gate.withPermit {
-                    val r = runCatching { fetchChannel(channel) }
+                    val r = runCatching { fetchChannel(channel, skipPage = channel.url in skipPageFor) }
                         .onFailure { Log.w(TAG, "Feed failed for ${channel.name}", it) }
                     onProgress(done.incrementAndGet(), channels.size)
                     channel to r
@@ -52,13 +63,15 @@ object FeedRepository {
                 .distinctBy { it.url }
                 .sortedByDescending { it.uploadedAtMs },
             failedChannels = results.filter { it.second.isFailure }.map { it.first.name },
+            failedUrls = results.filter { it.second.isFailure }.mapTo(HashSet()) { it.first.url },
         )
     }
 
-    private fun fetchChannel(channel: Channel): List<VideoItem> =
+    private fun fetchChannel(channel: Channel, skipPage: Boolean): List<VideoItem> =
         try {
             fromRss(channel)
         } catch (e: Exception) {
+            if (skipPage) throw e
             Log.i(TAG, "RSS failed for ${channel.name}, falling back to channel page")
             fromVideosTab(channel)
         }
