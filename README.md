@@ -62,17 +62,32 @@
   fullscreen when you turn sideways. On tablets the video and its details sit next to
   Up next, and fullscreen is a button on the player, like YouTube. A video never plays the
   next one on its own, and it pauses for calls and when you unplug your headphones.
-- **Resume where you left off**, and a max-quality setting.
+- **Mini player, like YouTube:** swipe the video down (or press Back) and it shrinks into a
+  bar above the tabs (on tablets, a floating video in the bottom corner) and keeps playing
+  while you search and browse. Tap it or swipe it up to bring it back; it has play/pause and
+  close buttons. Leaving the app pauses it.
+- **Quality picker** on the video (top right, with the controls): Auto plays the best quality
+  up to the max set in Settings and shows which one is playing, or pick any quality the video
+  has, for that video. It carries on from the same spot.
+- **Resume where you left off.**
 - Share a YouTube link to Antenna, or open youtube.com / youtu.be video links with it, to play it.
 - **Nothing leaves the phone:** history and subscriptions aren't included in Google Drive
   backups (moving to a new phone with Android's device-to-device transfer still brings them).
 
 ### Finding videos
 
-- **Search** with infinite scroll.
+- **Search** (the magnifier at the top) with suggestions as you type and infinite scroll. Tap a
+  result's channel avatar to open the channel: its subscriber count, a Subscribe button and
+  all its videos.
 - **Subscriptions with no account:** tap Subscribe on any video. The Subscriptions tab shows the
-  newest uploads from all your channels (pull down to refresh). Import your existing YouTube
+  newest uploads from all your channels (pull down to refresh). On tablets your channels are
+  listed beside them, by newest activity or A–Z; tap one to see only its videos. Import your existing YouTube
   subscriptions from Google Takeout ([below](#importing-your-youtube-subscriptions)).
+- **Analytics** tab: what your watch history says, worked out on the phone. Videos, watch
+  time, channels and how many you finish; watch time per day for the last 30 days; your top
+  channels (tap one to open it); the hours you watch; and how far you get into videos. Tap a
+  bar for its value. **Topics**: what you watch about, from video titles and the uploaders'
+  tags (tap one to search for it), and YouTube's categories (saved with each video you watch).
 - **Up next** under every video (Back returns to the previous one), and a **For you** home tab
   built from YouTube's suggestions for what you've watched ([below](#how-for-you-works)).
 - **History, like YouTube:** a red progress bar under every thumbnail you've started, "WATCHED"
@@ -150,13 +165,28 @@ Like [wirepulse](https://github.com/amreshh/wirepulse), a pull request builds an
 everything, and merging it releases exactly what it built and tested
 (`.github/workflows/ci.yaml`):
 
-- **Pull requests** run the unit tests, Android lint and the workflow checks (actionlint,
-  zizmor) side by side, and build the release APK: shrunk with R8, with the version merging
-  would release. That APK is then started on an Android emulator (the smoke test,
-  `.github/scripts/smoke-test.sh`): it has to install, start, show the home screen and load
-  a video in the player without crashing. One comment on the pull request sums it all up and
-  is updated on every run: each check's result, the test, lint, zizmor and smoke test
-  tables, the version merging releases, and a link to download the APK.
+- **Pull requests** run these side by side:
+  - **Unit tests** (`app/src/test`): For you's recommendations, the Analytics numbers, links
+    and the Takeout import, counts, durations and error messages, and a timing test that
+    builds For you from a full history.
+  - **Android lint**, and the **workflow checks** (actionlint, zizmor).
+  - **Dependency vulnerabilities**: every library in the release APK, at the version
+    Gradle resolves, checked against [osv.dev](https://osv.dev)
+    (`.github/scripts/osv-deps.py`). A known vulnerability fails it, unless
+    `.github/osv-ignore.txt` says why it doesn't apply. It also runs on `main` every week
+    (`dependency-scan.yaml`), since advisories appear for libraries nobody changed.
+  - **The release APK**: shrunk with R8, with the version merging would release, then
+    checked (`.github/scripts/apk-security.py`). It must not be debuggable, must use HTTPS
+    only and stay out of cloud backups, may only export the main screen and request the
+    expected permissions, must be signed with scheme v2 or newer, and must stay under 8 MB.
+  - **The smoke test** (`.github/scripts/smoke-test.sh`): that APK on an Android
+    emulator. It has to install, start, show the home screen, load a video in the player,
+    minimize it, find videos with search and open a result's channel, without crashing. It
+    also measures cold start (median of 5, budget 4 s) and memory with a video loaded
+    (budget 400 MB).
+
+  One comment on the pull request sums it all up and is updated on every run: each check's
+  result and its table, the version merging releases, and a link to download the APK.
 - **Merging into `main`** releases that APK: no checks run again and nothing is rebuilt. It
   gets signed with the release key (the only thing that changes), tagged `vX.Y.Z`, and
   published as a GitHub Release with its SHA-256 and release notes that group the commits by
@@ -226,8 +256,10 @@ app/src/main/java/com/example/antenna/
 ├── player/YoutubeDataSource.kt   fetches stream bytes the way YouTube expects (POST, rn, range, chunks)
 ├── sponsorblock/SponsorBlockClient.kt   segment lookup + skip reporting
 └── ui/                           Compose screens: search, subscriptions feed, channel list,
-                                  settings, player (+ skip loop and Subscribe button),
-                                  VideoLayouts.kt (phone rows / tablet grid)
+                                  settings, VideoLayouts.kt (phone rows / tablet grid), and
+                                  the player: PlayerViewModel.kt (playback, skip loop,
+                                  Subscribe), PlayerScreen.kt (the screen, drawn over the tabs),
+                                  MiniPlayer.kt (swiping it down into the mini player)
 art/logo.svg                      the logo; the launcher icon (res/drawable) is made from it
 .github/                          CI, release, CodeQL, Dependabot, labeler
 ```

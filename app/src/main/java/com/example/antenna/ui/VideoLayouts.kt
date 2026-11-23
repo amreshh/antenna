@@ -27,6 +27,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
@@ -34,9 +35,12 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.AsyncImage
+import coil3.compose.AsyncImage
 import com.example.antenna.data.WatchEntry
 import com.example.antenna.data.VideoItem
+import com.example.antenna.data.Channel
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.layout.size
 import com.example.antenna.data.WatchHistoryStore
 import com.example.antenna.data.ageLabel
 import com.example.antenna.data.formatDuration
@@ -77,15 +81,36 @@ internal fun VideoGrid(modifier: Modifier = Modifier, content: LazyGridScope.(wi
 internal fun LazyGridScope.fullWidthItem(key: Any? = null, content: @Composable () -> Unit) =
     item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
 
+/**
+ * With [onChannelClick], each video shows its channel's avatar (when its channel is known),
+ * and tapping the avatar opens the channel.
+ */
 internal fun LazyGridScope.videoItems(
     items: List<VideoItem>,
     wide: Boolean,
     onClick: (VideoItem) -> Unit,
     trailing: (@Composable (VideoItem) -> Unit)? = null,
+    onChannelClick: ((Channel) -> Unit)? = null,
 ) = items(items, key = { it.url }) { item ->
     val tail: (@Composable () -> Unit)? = trailing?.let { t -> { t(item) } }
-    if (wide) VideoCard(item, onClick = { onClick(item) }, trailing = tail)
-    else VideoRow(item, onClick = { onClick(item) }, trailing = tail)
+    val channel = item.channelUrl?.let { url -> Channel(url, item.uploader, item.channelAvatarUrl) }
+    val openChannel: (() -> Unit)? = onChannelClick?.let { open -> channel?.let { c -> { open(c) } } }
+    if (wide) VideoCard(item, onClick = { onClick(item) }, trailing = tail, onChannelClick = openChannel)
+    else VideoRow(item, onClick = { onClick(item) }, trailing = tail, onChannelClick = openChannel)
+}
+
+/** On a video's channel avatar (or channel line) that opens the channel: for the smoke test. */
+internal const val TAG_CHANNEL_AVATAR = "channel_avatar"
+
+/** A channel's round picture; grey until it loads, or if there is none. */
+@Composable
+internal fun ChannelAvatar(url: String?, modifier: Modifier = Modifier) {
+    AsyncImage(
+        model = url,
+        contentDescription = null,
+        contentScale = ContentScale.Crop,
+        modifier = modifier.clip(CircleShape).background(MaterialTheme.colorScheme.surfaceVariant),
+    )
 }
 
 /** Watch progress for a video, straight from the history store. */
@@ -97,12 +122,16 @@ internal fun rememberHistoryEntry(item: VideoItem): WatchEntry? {
     return remember(entries, item.url) { videoIdOf(item.url)?.let { entries[it] } }
 }
 
-/** Big thumbnail on top, title and channel below, like YouTube's tablet layout. */
+/**
+ * Big thumbnail on top, title and channel below, like YouTube's tablet layout. With
+ * [onChannelClick], the channel's avatar sits next to the title and opens the channel.
+ */
 @Composable
 internal fun VideoCard(
     item: VideoItem,
     onClick: () -> Unit,
     trailing: (@Composable () -> Unit)? = null,
+    onChannelClick: (() -> Unit)? = null,
 ) {
     val entry = rememberHistoryEntry(item)
     Column(
@@ -113,6 +142,17 @@ internal fun VideoCard(
     ) {
         VideoThumbnail(item, entry, Modifier.fillMaxWidth(), corner = 12)
         Row(Modifier.padding(top = 8.dp, start = 4.dp)) {
+            if (onChannelClick != null) {
+                ChannelAvatar(
+                    item.channelAvatarUrl,
+                    Modifier
+                        .padding(end = 12.dp)
+                        .size(36.dp)
+                        .clip(CircleShape)
+                        .clickable(onClickLabel = "Open the channel", onClick = onChannelClick)
+                        .testTag(TAG_CHANNEL_AVATAR),
+                )
+            }
             VideoText(item, entry, Modifier.weight(1f).padding(end = 4.dp), titleLines = 2)
             trailing?.invoke()
         }
@@ -160,8 +200,18 @@ internal fun VideoThumbnail(item: VideoItem, entry: WatchEntry?, modifier: Modif
     }
 }
 
+/**
+ * Title, then channel and age. With [onChannelClick] (phone rows) the channel line gets the
+ * channel's avatar in front and opens the channel.
+ */
 @Composable
-internal fun VideoText(item: VideoItem, entry: WatchEntry?, modifier: Modifier, titleLines: Int = 3) {
+internal fun VideoText(
+    item: VideoItem,
+    entry: WatchEntry?,
+    modifier: Modifier,
+    titleLines: Int = 3,
+    onChannelClick: (() -> Unit)? = null,
+) {
     Column(modifier) {
         Text(
             item.title,
@@ -172,7 +222,22 @@ internal fun VideoText(item: VideoItem, entry: WatchEntry?, modifier: Modifier, 
         val meta = listOf(item.uploader, item.ageLabel())
             .filter { it.isNotBlank() }
             .joinToString(" · ")
-        Text(meta, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+        if (onChannelClick != null) {
+            Row(
+                Modifier
+                    .padding(top = 4.dp)
+                    .clip(RoundedCornerShape(12.dp))
+                    .clickable(onClickLabel = "Open the channel", onClick = onChannelClick)
+                    .testTag(TAG_CHANNEL_AVATAR)
+                    .padding(end = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ChannelAvatar(item.channelAvatarUrl, Modifier.size(24.dp))
+                Text(meta, Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, maxLines = 2)
+            }
+        } else {
+            Text(meta, style = MaterialTheme.typography.bodySmall, maxLines = 2)
+        }
         if (entry?.isWatched == true) {
             Text(
                 "WATCHED",

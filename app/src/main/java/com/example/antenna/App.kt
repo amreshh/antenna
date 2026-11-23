@@ -1,6 +1,10 @@
 package com.example.antenna
 
 import android.app.Application
+import coil3.ImageLoader
+import coil3.PlatformContext
+import coil3.SingletonImageLoader
+import coil3.network.okhttp.OkHttpNetworkFetcherFactory
 import com.example.antenna.data.SubscriptionStore
 import com.example.antenna.data.WatchHistoryStore
 import com.example.antenna.net.OkHttpDownloader
@@ -9,7 +13,7 @@ import org.schabi.newpipe.extractor.NewPipe
 import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
-class App : Application() {
+class App : Application(), SingletonImageLoader.Factory {
 
     companion object {
         /** One shared HTTP client for extraction, playback and SponsorBlock. */
@@ -31,4 +35,10 @@ class App : Application() {
             SubscriptionStore.get(this)
         }
     }
+
+    /** Coil's image loader: thumbnails and avatars come through the shared [http] client too. */
+    override fun newImageLoader(context: PlatformContext): ImageLoader =
+        ImageLoader.Builder(context)
+            .components { add(OkHttpNetworkFetcherFactory(callFactory = { http })) }
+            .build()
 }

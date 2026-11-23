@@ -6,6 +6,7 @@ import com.example.antenna.data.VideoItem
 import com.example.antenna.data.YouTubeRepository
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -29,7 +30,14 @@ data class SearchUiState(
     val loading: Boolean = false,
     val error: String? = null,
     val canLoadMore: Boolean = false,
+    /** What YouTube suggests for the query being typed. */
+    val suggestions: List<String> = emptyList(),
+    /** Whether the search box has the focus: the suggestions show instead of the results. */
+    val editing: Boolean = false,
 )
+
+private const val SUGGEST_DELAY_MS = 150L
+private const val MAX_SUGGESTIONS = 10
 
 class SearchViewModel : ViewModel() {
 
@@ -39,8 +47,43 @@ class SearchViewModel : ViewModel() {
     private var activeQuery = ""
     private var nextPage: Page? = null
     private var job: Job? = null
+    private var suggestJob: Job? = null
 
-    fun onQueryChange(q: String) = _state.update { it.copy(query = q) }
+    fun onQueryChange(q: String) {
+        _state.update { it.copy(query = q) }
+        suggest(q.trim())
+    }
+
+    fun onEditingChange(editing: Boolean) = _state.update { it.copy(editing = editing) }
+
+    /** A suggestion was picked: search for it. */
+    fun searchFor(q: String) {
+        _state.update { it.copy(query = q) }
+        search()
+    }
+
+    /**
+     * Fetches suggestions for what's typed, once typing pauses for a moment. They're only
+     * nice to have, so a failure just leaves the last ones.
+     */
+    private fun suggest(q: String) {
+        suggestJob?.cancel()
+        if (q.isEmpty()) {
+            _state.update { it.copy(suggestions = emptyList()) }
+            return
+        }
+        suggestJob = viewModelScope.launch {
+            delay(SUGGEST_DELAY_MS)
+            val list = try {
+                YouTubeRepository.suggestions(q)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (_: Exception) {
+                return@launch
+            }
+            _state.update { it.copy(suggestions = list.take(MAX_SUGGESTIONS)) }
+        }
+    }
 
     fun search() {
         val q = _state.value.query.trim()
@@ -54,7 +97,7 @@ class SearchViewModel : ViewModel() {
                 val page = YouTubeRepository.search(q)
                 nextPage = page.nextPage
                 _state.update {
-                    it.copy(items = page.items, loading = false, canLoadMore = page.nextPage != null)
+                    it.copy(items = page.items.newestFirst(), loading = false, canLoadMore = page.nextPage != null)
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -74,7 +117,7 @@ class SearchViewModel : ViewModel() {
                 nextPage = more.nextPage
                 _state.update { s ->
                     s.copy(
-                        items = (s.items + more.items).distinctBy { it.url },
+                        items = (s.items + more.items).distinctBy { it.url }.newestFirst(),
                         loading = false,
                         canLoadMore = more.nextPage != null,
                     )
@@ -87,6 +130,13 @@ class SearchViewModel : ViewModel() {
         }
     }
 }
+
+/**
+ * Results newest first. YouTube no longer sorts search results by upload date (it ignores
+ * that filter), so the app does, for the results loaded so far: a page that loads while
+ * scrolling is merged in by date. Ties and unknown dates (last) keep YouTube's order.
+ */
+private fun List<VideoItem>.newestFirst(): List<VideoItem> = sortedByDescending { it.uploadedAtMs }
 
 /** An error message for people, for the errors YouTube and the network commonly cause. */
 internal fun Throwable.readable(): String = when (this) {

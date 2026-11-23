@@ -30,6 +30,10 @@ data class WatchEntry(
     val lastWatchedAt: Long,
     /** YouTube's "up next" suggestions for this video, used to build the For you tab. */
     val related: List<VideoItem> = emptyList(),
+    /** YouTube's category for it ("Music", "Gaming"…), for the Analytics tab; null if not recorded. */
+    val category: String? = null,
+    /** The uploader's tags for it (the first [WatchHistoryStore.MAX_TAGS]), for the Analytics tab's topics. */
+    val tags: List<String> = emptyList(),
 ) {
     val fraction: Float
         get() = if (durationMs <= 0) 0f else (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
@@ -67,8 +71,18 @@ class WatchHistoryStore private constructor(context: Context) {
 
     fun entryFor(url: String): WatchEntry? = videoIdOf(url)?.let { _entries.value[it] }
 
-    /** Saves the playback position. [related] = null keeps the list stored earlier. */
-    fun record(video: VideoItem, positionMs: Long, durationMs: Long, related: List<VideoItem>? = null) {
+    /**
+     * Saves the playback position. [related], [category] and [tags] are known when a video
+     * opens; null keeps what was stored earlier.
+     */
+    fun record(
+        video: VideoItem,
+        positionMs: Long,
+        durationMs: Long,
+        related: List<VideoItem>? = null,
+        category: String? = null,
+        tags: List<String>? = null,
+    ) {
         val id = videoIdOf(video.url) ?: return
         _entries.update { map ->
             val old = map[id]
@@ -78,6 +92,8 @@ class WatchHistoryStore private constructor(context: Context) {
                 durationMs = durationMs,
                 lastWatchedAt = System.currentTimeMillis(),
                 related = related ?: old?.related.orEmpty(),
+                category = category?.takeIf { it.isNotBlank() } ?: old?.category,
+                tags = tags?.take(MAX_TAGS) ?: old?.tags.orEmpty(),
             )
             trim(map + (id to entry))
         }
@@ -128,7 +144,9 @@ class WatchHistoryStore private constructor(context: Context) {
                     .put("pos", e.positionMs)
                     .put("dur", e.durationMs)
                     .put("at", e.lastWatchedAt)
-                    .put("related", JSONArray().apply { e.related.forEach { put(it.toJson()) } }),
+                    .put("related", JSONArray().apply { e.related.forEach { put(it.toJson()) } })
+                    .put("cat", e.category ?: JSONObject.NULL)
+                    .put("tags", JSONArray(e.tags)),
             )
         }
         var out: FileOutputStream? = null
@@ -153,12 +171,15 @@ class WatchHistoryStore private constructor(context: Context) {
             val video = videoFromJson(o.getJSONObject("video"))
             val id = videoIdOf(video.url) ?: return@mapNotNull null
             val rel = o.optJSONArray("related") ?: JSONArray()
+            val tags = o.optJSONArray("tags") ?: JSONArray()
             id to WatchEntry(
                 video = video,
                 positionMs = o.optLong("pos"),
                 durationMs = o.optLong("dur"),
                 lastWatchedAt = o.optLong("at"),
                 related = (0 until rel.length()).map { videoFromJson(rel.getJSONObject(it)) },
+                category = o.optString("cat").takeIf { it.isNotEmpty() && !o.isNull("cat") },
+                tags = (0 until tags.length()).map { tags.getString(it) },
             )
         }.toMap()
     }.getOrElse {
@@ -168,7 +189,8 @@ class WatchHistoryStore private constructor(context: Context) {
 
     companion object {
         private const val MAX_ENTRIES = 1000
-        private const val MAX_WITH_RELATED = 50
+        const val MAX_TAGS = 15
+        private const val MAX_WITH_RELATED = 150
         private const val SAVE_DELAY_MS = 10_000L
 
         @Volatile

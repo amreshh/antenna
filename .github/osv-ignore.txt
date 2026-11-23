@@ -1,0 +1,4 @@
+# Advisories the dependency scan (.github/scripts/osv-deps.py) should not fail on,
+# one id per line (OSV, GHSA or CVE), with the reason it can't affect the app:
+#
+#   GHSA-xxxx-xxxx-xxxx  # only affects the server side of the library, which the app doesn't use

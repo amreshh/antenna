@@ -10,7 +10,8 @@ player:
   - changed-files:
       - any-glob-to-any-file:
           - app/src/main/java/**/player/**
-          - app/src/main/java/**/ui/PlayerActivity.kt
+          - app/src/main/java/**/ui/Player*.kt
+          - app/src/main/java/**/ui/MiniPlayer.kt
 
 sponsorblock:
   - changed-files:

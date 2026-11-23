@@ -1,0 +1,48 @@
+name: dependency-scan
+
+# Known vulnerabilities in the libraries the release APK is built from, on main
+# every week (.github/scripts/osv-deps.py, against osv.dev). New advisories
+# appear for libraries nobody changed, and a pull request's scan (the ci
+# workflow's deps job) only sees them when there's a pull request. A failed run
+# means one was found: GitHub emails it, and the run summary has the table.
+on:
+  schedule:
+    - cron: "41 3 * * 3" # Wednesdays, 03:41 UTC
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: true
+
+# No token permissions unless a job asks for them.
+permissions: {}
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 25 # what gradle/gradle-daemon-jvm.properties asks for
+
+      # Gradle's downloads, restored from main's cache (this runs on main).
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # v6.4.1
+        with:
+          cache-read-only: true
+
+      - name: The release APK's libraries
+        run: ./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath > "$RUNNER_TEMP/deps.txt"
+
+      - name: Known vulnerabilities
+        run: |
+          status=0
+          python3 -I .github/scripts/osv-deps.py "$RUNNER_TEMP/deps.txt" > "$RUNNER_TEMP/deps-summary.md" || status=$?
+          cat "$RUNNER_TEMP/deps-summary.md" >> "$GITHUB_STEP_SUMMARY"
+          exit "$status"
