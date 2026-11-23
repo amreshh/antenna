@@ -295,9 +295,10 @@ everything, and merging it releases exactly what it built and tested
 4. **Settings → Advanced Security:** turn on Dependabot alerts and security updates, and
    leave CodeQL's *default* setup off (the workflow is the advanced setup).
 5. **A branch rule on `main`** (Settings → Rules → Rulesets, or Branches): require a pull
-   request, require the status checks `checks` and `Analyze (java-kotlin)` (CodeQL), and
-   require branches to be up to date before merging. Then nothing unchecked can be merged,
-   and every merge releases exactly the APK its pull request tested.
+   request, require the status checks `checks`, `Analyze (java-kotlin)` and `Analyze (actions)`
+   (CodeQL: the code, and the workflows), and require branches to be up to date before
+   merging. Then nothing unchecked can be merged, and every merge releases exactly the APK
+   its pull request tested.
 6. **After merging `dev` into `main`** with a squash merge, reset `dev` to `main`
    (`git switch dev && git reset --hard origin/main && git push --force-with-lease`), so the
    next pull request only shows new changes.
