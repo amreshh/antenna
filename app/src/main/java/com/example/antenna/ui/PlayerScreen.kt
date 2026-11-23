@@ -83,8 +83,10 @@ import androidx.media3.common.util.UnstableApi
 import androidx.media3.ui.PlayerView
 import coil3.compose.AsyncImage
 import com.example.antenna.data.Channel
+import com.example.antenna.data.OpenSource
 import com.example.antenna.data.VideoItem
 import com.example.antenna.data.formatDuration
+import com.example.antenna.player.SeekBarSegments
 import com.example.antenna.sponsorblock.Segment
 import com.example.antenna.sponsorblock.SponsorCategory
 import org.schabi.newpipe.extractor.stream.Description
@@ -114,6 +116,8 @@ sealed interface PlayerUiState {
         val subscribers: String = "",
         /** null while the SponsorBlock lookup is still running */
         val segments: List<Segment>?,
+        /** How long the video is, as YouTube says; 0 for live streams. */
+        val durationMs: Long = 0,
         /** YouTube's "up next" recommendations for this video */
         val related: List<VideoItem>,
         /** "1.2M views · 3 days ago" */
@@ -213,7 +217,7 @@ internal fun PlayerSheet(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
             )
-            related.forEach { item -> VideoRow(item, onClick = { vm.openLink(item.url) }, trailing = { VideoMenu(item) }) }
+            related.forEach { item -> VideoRow(item, onClick = { vm.openLink(item.url, OpenSource.UpNext) }, trailing = { VideoMenu(item) }) }
         }
     }
 
@@ -262,6 +266,10 @@ internal fun PlayerSheet(
             // The video: drag it down to minimize, or (minimized) tap it to bring it back.
             {
                 Box(Modifier.graphicsLayer(floatingCard).sheetDrag(sheet, onTap = { (!atTop).also { if (it) vm.expand() } })) {
+                    // The sponsor segments, drawn on the seek bar.
+                    val ready = state as? PlayerUiState.Ready
+                    val barSegments = ready?.segments.orEmpty()
+                    val barDuration = ready?.durationMs ?: 0L
                     AndroidView(
                         factory = { ctx ->
                             PlayerView(ctx).apply {
@@ -270,9 +278,11 @@ internal fun PlayerSheet(
                                 setControllerVisibilityListener(
                                     PlayerView.ControllerVisibilityListener { controlsVisible = it == View.VISIBLE },
                                 )
+                                tag = SeekBarSegments(this)
                             }
                         },
                         update = { view ->
+                            (view.tag as? SeekBarSegments)?.show(barSegments, barDuration)
                             // Only the full-size player has controls; minimized, a tap opens it.
                             view.useController = atTop
                             if (!atTop) view.hideController()

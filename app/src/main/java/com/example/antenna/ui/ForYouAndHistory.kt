@@ -44,7 +44,11 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
+import com.example.antenna.data.GuessReason
+import com.example.antenna.data.Prefetcher
+import com.example.antenna.data.forgetWatched
 
 class ForYouViewModel(app: Application) : AndroidViewModel(app) {
 
@@ -68,6 +72,8 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
         ) { loaded, h, channels, s, uploads ->
             if (!loaded) null else Recommender.build(h, channels.map { it.name }.toSet(), s, uploads)
         }
+            // What's at the top is what you're likely to tap: guesses for Prefetcher.
+            .onEach { list -> list?.let { Prefetcher.get(app).shows(GuessReason.ForYou, it) } }
             .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
 
@@ -189,7 +195,8 @@ fun HistoryTab(onOpenVideo: (String) -> Unit, modifier: Modifier = Modifier) {
             wide,
             onClick = { onOpenVideo(it.url) },
             trailing = { video ->
-                IconButton(onClick = { store.remove(video.url) }) {
+                // With what else was recorded about it (the watch log, the app's guesses).
+                IconButton(onClick = { forgetWatched(context, video.url) }) {
                     Icon(Icons.Default.Close, contentDescription = "Remove from history")
                 }
             },

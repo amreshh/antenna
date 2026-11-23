@@ -20,19 +20,26 @@ data class Segment(
     val endMs: Long,
 )
 
-enum class SponsorCategory(val key: String, val label: String) {
-    SPONSOR("sponsor", "Sponsor"),
-    SELF_PROMO("selfpromo", "Unpaid / self promotion"),
-    INTERACTION("interaction", "Interaction reminder (like & subscribe)"),
-    INTRO("intro", "Intermission / intro animation"),
-    OUTRO("outro", "Endcards / credits"),
-    PREVIEW("preview", "Preview / recap"),
-    FILLER("filler", "Filler tangent"),
-    MUSIC_OFFTOPIC("music_offtopic", "Non-music section (music videos)");
+enum class SponsorCategory(
+    val key: String,
+    val label: String,
+    /** What's skipped, in a word or two: for lists without room for [label] (the Analytics tab). */
+    val shortLabel: String,
+) {
+    SPONSOR("sponsor", "Sponsor", "Sponsors"),
+    SELF_PROMO("selfpromo", "Unpaid / self promotion", "Self promotion"),
+    INTERACTION("interaction", "Interaction reminder (like & subscribe)", "Interaction reminders"),
+    INTRO("intro", "Intermission / intro animation", "Intros"),
+    OUTRO("outro", "Endcards / credits", "Endcards"),
+    PREVIEW("preview", "Preview / recap", "Previews"),
+    FILLER("filler", "Filler tangent", "Filler"),
+    MUSIC_OFFTOPIC("music_offtopic", "Non-music section (music videos)", "Non-music");
 
     companion object {
         val DEFAULT_ON = setOf(SPONSOR.key, SELF_PROMO.key, INTERACTION.key)
-        fun labelFor(key: String) = entries.firstOrNull { it.key == key }?.label ?: key
+        fun labelFor(key: String) = of(key)?.label ?: key
+        fun shortLabelFor(key: String) = of(key)?.shortLabel ?: key
+        private fun of(key: String) = entries.firstOrNull { it.key == key }
     }
 }
 

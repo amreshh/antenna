@@ -36,6 +36,8 @@ data class WatchEntry(
     val category: String? = null,
     /** The uploader's tags for it (the first [WatchHistoryStore.MAX_TAGS]), for the Analytics tab's topics. */
     val tags: List<String> = emptyList(),
+    /** What SponsorBlock skipped in it, each segment once ([withSkip]), for the Analytics tab. */
+    val skipped: List<SkippedSegment> = emptyList(),
 ) {
     val fraction: Float
         get() = if (durationMs <= 0) 0f else (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
@@ -49,6 +51,29 @@ data class WatchEntry(
     val isWatched: Boolean
         get() = durationMs > 0 &&
             (fraction >= 0.9f || (fraction >= 0.5f && durationMs - positionMs < 30_000))
+}
+
+/** A SponsorBlock segment the player skipped in a video. */
+data class SkippedSegment(
+    /** SponsorBlock's category ("sponsor", "selfpromo"…). */
+    val category: String,
+    /** Where it starts: with [category], which segment it is. */
+    val startMs: Long,
+    /** How much of the video the skip jumped over. */
+    val skippedMs: Long,
+)
+
+/**
+ * This entry with [skip] noted. A segment skipped again (watching the video twice, or going
+ * back into it) is still one segment: the longest jump over it is kept.
+ */
+internal fun WatchEntry.withSkip(skip: SkippedSegment): WatchEntry {
+    val i = skipped.indexOfFirst { it.category == skip.category && it.startMs == skip.startMs }
+    return when {
+        i < 0 -> copy(skipped = skipped + skip)
+        skipped[i].skippedMs >= skip.skippedMs -> this
+        else -> copy(skipped = skipped.toMutableList().apply { set(i, skip) })
+    }
 }
 
 /**
@@ -126,6 +151,7 @@ class WatchHistoryStore private constructor(context: Context) {
                 related = related ?: old?.related.orEmpty(),
                 category = category?.takeIf { it.isNotBlank() } ?: old?.category,
                 tags = tags?.take(MAX_TAGS) ?: old?.tags.orEmpty(),
+                skipped = old?.skipped.orEmpty(),
             )
             val updated = map + (id to entry)
             // Only a new video or a new up next list can push older ones past the limits;
@@ -134,6 +160,24 @@ class WatchHistoryStore private constructor(context: Context) {
         }
         if (added || related != null) relatedChanged.set(true)
         saveSoon()
+    }
+
+    /**
+     * Notes that SponsorBlock's segment of [category] starting at [startMs] was skipped in
+     * [video], jumping [skippedMs] (the Analytics tab counts them). Skipping it again
+     * doesn't count twice ([withSkip]).
+     */
+    fun recordSkip(video: VideoItem, category: String, startMs: Long, skippedMs: Long) {
+        val id = videoIdOf(video.url) ?: return
+        val skip = SkippedSegment(category, startMs, skippedMs.coerceAtLeast(0))
+        var changed = false
+        _entries.update { map ->
+            val old = map[id] ?: return@update map // taken out of the history meanwhile
+            val new = old.withSkip(skip)
+            changed = new !== old
+            if (changed) map + (id to new) else map
+        }
+        if (changed) saveSoon()
     }
 
     fun remove(url: String) {
@@ -280,11 +324,24 @@ internal fun encodeHistory(entries: Map<String, WatchEntry>): String {
                 .put("dur", e.durationMs)
                 .put("at", e.lastWatchedAt)
                 .put("cat", e.category ?: JSONObject.NULL)
-                .put("tags", JSONArray(e.tags)),
+                .put("tags", JSONArray(e.tags))
+                .apply { if (e.skipped.isNotEmpty()) put("skips", skipsToJson(e.skipped)) },
         )
     }
     return json.toString()
 }
+
+private fun skipsToJson(skips: List<SkippedSegment>) = JSONArray().apply {
+    skips.forEach { put(JSONObject().put("cat", it.category).put("start", it.startMs).put("ms", it.skippedMs)) }
+}
+
+/** The skips in a history entry's "skips" (none in older files); one that can't be read is left out. */
+private fun skipsFromJson(arr: JSONArray?): List<SkippedSegment> =
+    if (arr == null) emptyList()
+    else (0 until arr.length()).mapNotNull { i ->
+        val o = arr.optJSONObject(i) ?: return@mapNotNull null
+        SkippedSegment(o.optString("cat"), o.optLong("start"), o.optLong("ms")).takeIf { it.category.isNotEmpty() }
+    }
 
 /** The related file: the up next lists, by video id, of the entries that have one. */
 internal fun encodeRelated(entries: Map<String, WatchEntry>): String {
@@ -323,6 +380,7 @@ internal fun decodeHistory(history: String, related: String?): DecodedHistory {
                 related = (0 until rel.length()).mapNotNull { j -> runCatching { videoFromJson(rel.getJSONObject(j)) }.getOrNull() },
                 category = o.optString("cat").takeIf { it.isNotEmpty() && !o.isNull("cat") },
                 tags = (0 until tags.length()).map { tags.getString(it) },
+                skipped = skipsFromJson(o.optJSONArray("skips")),
             )
         } catch (_: Exception) {
             skipped++

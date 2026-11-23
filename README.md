@@ -54,8 +54,9 @@
 - **Sponsor skipping:** segment times come from [SponsorBlock](https://sponsor.ajay.app).
   The lookup uses the privacy-preserving hash-prefix endpoint, so SponsorBlock never learns
   exactly which video you're watching. Choose which categories to skip in Settings, and tap a
-  segment in the list to watch it instead. Counting your skips in SponsorBlock's public stats
-  is opt-in (Settings), because that report does name the video.
+  segment in the list to watch it instead. The segments show on the seek bar, in green. Counting
+  your skips in SponsorBlock's public stats is opt-in (Settings), because that report does name
+  the video.
 - **The player:** title, channel with a Subscribe button, and the description (views, date,
   tap for the full text). Timestamps in the description jump to that point, links to other
   videos open in Antenna, and other links in your browser. On phones the video goes
@@ -75,10 +76,20 @@
   expire after some hours) gets fresh ones and carries on from the same spot. If it still
   can't play, the error says why, with Try again.
 - **Light on data:** on mobile data the app plays at most 480p (Settings → Max video quality on
-  mobile data). It buffers 15–30 seconds ahead rather than 50, so less is wasted when you leave
-  a video early. Back through Up next reuses the details it already has. The Subscriptions feed
-  isn't loaded again within 15 minutes, and a channel whose feed and page both failed isn't
-  sent to its (much bigger) page again for a day.
+  mobile data). Of a quality's files (AV1, VP9, H.264) it plays the smallest the phone decodes
+  in hardware: YouTube says how big each is, and the newer codecs aren't always smaller. It
+  buffers 15–30 seconds ahead rather than 50, so less is wasted when you leave a video early,
+  and starts playing once 1 second is buffered. Back through Up next reuses the details it
+  already has. The Subscriptions feed isn't loaded again within 15 minutes, and a channel whose
+  feed and page both failed isn't sent to its (much bigger) page again for a day.
+- **Likely videos start sooner:** most of the wait when a video starts is fetching its details
+  and links, so when the app opens it guesses up to 3 videos you're likely to watch (one you
+  didn't finish, the newest in Watch later, the top of For you, new uploads, and the next video
+  of a channel you're working through in order) and fetches their details, never any video.
+  It ranks them by which channels you watch at this time of day, and keeps score: every guess is checked against what you open, kinds of guess and channels that
+  keep missing go down, and it fetches fewer, or none, while its guesses aren't opened. It keeps
+  guessing without fetching, and starts again once they'd be right. Analytics shows how it's
+  doing (Ready before you tapped), and Settings turns it off.
 - **Watch later:** save any video from its ⋮ menu, or with Watch later under the one you're
   watching. The Watch later tab lists them, newest first; Remove watched clears the ones
   you've finished.
@@ -93,7 +104,9 @@
   all its videos.
 - **Subscriptions with no account:** tap Subscribe on any video. The Subscriptions tab shows the
   newest uploads from all your channels (pull down to refresh). It opens straight away with the
-  feed as it last loaded, while the fresh one loads. On tablets your channels are
+  feed as it last loaded, while the fresh one loads. Shorts are kept apart: the feed shows the
+  other videos, and the Shorts chip above them shows the Shorts, in a grid of tall
+  thumbnails. On tablets your channels are
   listed beside them, by newest activity, A–Z or topic; tap one to see only its videos. Import your existing YouTube
   subscriptions from Google Takeout ([below](#importing-your-youtube-subscriptions)), and export
   them as the same kind of file.
@@ -103,11 +116,33 @@
   it; channels that couldn't be checked are always kept.
 - **Analytics** tab: what your watch history says, worked out on the phone. Videos, watch
   time, channels and how many you finish; watch time per day for the last 30 days; your top
-  channels (tap one to see only its numbers); the hours you watch; and how far you get into
-  videos. Tap a bar for its value. **Topics**: what you watch about, from video titles and the uploaders'
-  tags (tap one to search for it), and YouTube's categories (saved with each video you watch).
+  channels; what SponsorBlock skipped for you (the time, and which kinds: sponsors, self
+  promotion…); the hours you watch; and how far you get into videos. **Topics**: what you
+  watch about, from video titles and the uploaders' tags, and YouTube's categories (saved with
+  each video you watch).
+  **Tap any bar** to narrow the whole tab to its videos: a day, an hour, a channel, a topic, a
+  kind of skipped segment… Picks in different cards combine. The bar at the top lists them
+  (with Open channel, or Search for a topic); × or Back takes one off. **Ready before you
+  tapped**: how many of the videos you opened the app had ready, how often each kind of guess
+  was opened, and what it fetches now.
+  More cards: **Subscriptions** (watch time from channels you subscribe to and from the rest;
+  channels you watch a lot without subscribing, with Subscribe; subscriptions you haven't
+  watched in 3 months, with Unsubscribe), **Video length** (and how many of each you finish),
+  **Where you open videos** (For you, Subscriptions, Up next, search…), **How new** videos
+  were when you first watched them, and **Sittings** (how often you sit down to watch, for how
+  long, what you actually played, days in a row, and videos you played part of again). The
+  top tiles compare the last 7 days with the 7 before. Length, where from, how new and
+  subscribed or not are picks too.
+- **The watch log:** besides the history (how far into each video you got, and when you last
+  watched it), the app records each stretch of watching: which part of the video played, when,
+  and where you opened it from. A pause, a seek, a SponsorBlock skip or another video ends a
+  stretch. It's what Sittings and Where you open videos come from, so they count from when it
+  started being recorded. It stays on the phone (a file in the app's storage, out of cloud
+  backups, kept 400 days); removing a video from the history, or clearing it, removes its
+  stretches too.
 - **Up next** under every video (Back returns to the previous one), and a **For you** home tab
-  built from YouTube's suggestions for what you've watched ([below](#how-for-you-works)).
+  built from YouTube's suggestions for what you've watched ([below](#how-for-you-works)). The
+  logo at the top goes back to it.
 - **History, like YouTube:** a red progress bar under every thumbnail you've started, "WATCHED"
   near the end, and a History tab. Watched videos can be hidden from the Subscriptions feed.
 - **Tablets and foldables:** the lists become a grid of large thumbnails, with more columns
@@ -191,9 +226,10 @@ everything, and merging it releases exactly what it built and tested
 (`.github/workflows/ci.yaml`):
 
 - **Pull requests** run these side by side:
-  - **Unit tests** (`app/src/test`): For you's recommendations, the Analytics numbers, links
-    and the Takeout import, counts, durations and error messages, and a timing test that
-    builds For you from a full history.
+  - **Unit tests** (`app/src/test`): For you's recommendations, the Analytics numbers and
+    picks, guessing which videos to get ready and keeping score, links and the Takeout import,
+    counts, durations and error messages, which stream plays, the seek bar's segment markers,
+    and timing tests that build For you and Analytics from a full history.
   - **Android lint**, and the **workflow checks** (actionlint, zizmor).
   - **Dependency vulnerabilities**: every library in the release APK, at the version
     Gradle resolves, checked against [osv.dev](https://osv.dev)
@@ -208,7 +244,8 @@ everything, and merging it releases exactly what it built and tested
     emulator. It has to install, start, show the home screen, load a video in the player,
     minimize it, find videos with search and open a result's channel, without crashing. It
     also measures cold start (median of 5, budget 4 s) and memory with a video loaded
-    (budget 400 MB).
+    (budget 400 MB), and reports how long the video took to start playing (fetching its
+    details and links, then buffering; no budget, as that depends on YouTube's servers).
 
   One comment on the pull request sums it all up and is updated on every run: each check's
   result and its table, the version merging releases, and a link to download the APK.
@@ -279,6 +316,11 @@ app/src/main/java/com/example/antenna/
 ├── data/Recommender.kt           ranks the For you tab from your history
 ├── player/StreamPicker.kt        picks the best video-only + audio stream and merges them
 ├── player/YoutubeDataSource.kt   fetches stream bytes the way YouTube expects (POST, rn, range, chunks)
+├── player/SeekBarSegments.kt     draws the SponsorBlock segments on the seek bar
+├── data/WatchStats.kt            the Analytics numbers, and narrowing them to what's picked
+├── data/Guesses.kt               guessing what you'll open next, and keeping score of the guesses
+├── data/Prefetcher.kt            fetches the likeliest guesses' details when the app opens
+├── data/WatchLog.kt              each stretch of watching (the watch log), and sittings from it
 ├── sponsorblock/SponsorBlockClient.kt   segment lookup + skip reporting
 └── ui/                           Compose screens: search, subscriptions feed, channel list,
                                   settings, VideoLayouts.kt (phone rows / tablet grid), and
@@ -292,10 +334,8 @@ art/logo.svg                      the logo; the launcher icon (res/drawable) is 
 ## Ideas for next steps
 
 - Background / picture-in-picture playback (a Media3 `MediaSessionService`)
-- Grouping or filtering Shorts out of the feed
 - A background refresh of the feed with new-video notifications (WorkManager)
 - Subtitles (`info.subtitles` → `MediaItem.SubtitleConfiguration`)
-- Sponsor segments drawn on the seek bar
 - Targeting Android 17 (API 37) once it's checked on a real Android 17 phone (see `targetSdk` in `app/build.gradle.kts`)
 - "Not interested" on For you items (save a block list of video ids / channels in `Recommender`)
 - DeArrow (crowdsourced titles and thumbnails, from the same team as SponsorBlock)

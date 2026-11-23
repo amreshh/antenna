@@ -1,5 +1,12 @@
 package com.example.antenna.ui
 
+import android.content.ActivityNotFoundException
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ApplicationInfo
+import android.widget.Toast
+import androidx.core.content.pm.PackageInfoCompat
+import androidx.core.net.toUri
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -46,6 +53,7 @@ fun SettingsScreen(onBack: () -> Unit) {
     var maxHeightMetered by remember { mutableIntStateOf(prefs.maxHeightMetered) }
     var hideWatched by remember { mutableStateOf(prefs.hideWatched) }
     var reportSkips by remember { mutableStateOf(prefs.reportSkips) }
+    var prefetch by remember { mutableStateOf(prefs.prefetch) }
 
     Scaffold(
         topBar = {
@@ -97,6 +105,22 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            item { Header("Starting videos") }
+            item {
+                SettingRow(
+                    "Get likely videos ready",
+                    detail = "When the app opens, it fetches the details of up to 3 videos you're likely to " +
+                        "watch, so they start sooner: a few small requests, never any video. It fetches " +
+                        "fewer, or none, when its guesses aren't opened. Analytics shows how it's doing.",
+                    onClick = {
+                        prefetch = !prefetch
+                        prefs.prefetch = prefetch
+                    },
+                ) {
+                    Switch(checked = prefetch, onCheckedChange = null)
+                }
+            }
+
             item { Header("Max video quality") }
             items(QUALITIES) { q ->
                 SettingRow("${q}p", onClick = {
@@ -125,15 +149,60 @@ fun SettingsScreen(onBack: () -> Unit) {
                 }
             }
 
+            item { Header("About") }
+            item { InfoRow("Version", remember(context) { appVersion(context) }) }
+            item { InfoRow("Source code", "github.com/amreshh/antenna", onClick = { openLink(context, REPO) }) }
+            item { InfoRow("Releases", "The latest version, and what changed", onClick = { openLink(context, "$REPO/releases") }) }
+            item { InfoRow("License", "GNU GPL 3.0 or later", onClick = { openLink(context, "$REPO/blob/main/LICENSE") }) }
             item {
                 Text(
-                    "Sponsor segments are crowdsourced by sponsor.ajay.app. " +
-                        "Ads are never loaded because videos play straight from the stream URLs.",
+                    "Videos come from YouTube through NewPipeExtractor, and play straight from their stream " +
+                        "URLs, so YouTube's ads are never loaded. Sponsor segments are crowdsourced by " +
+                        "sponsor.ajay.app (CC BY-NC-SA 4.0). Your history, subscriptions and stats stay on " +
+                        "this phone. Not affiliated with YouTube or Google.",
                     style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.padding(16.dp),
                 )
             }
         }
+    }
+}
+
+private const val REPO = "https://github.com/amreshh/antenna"
+
+/** "0.4.2 (4002)", with " · debug build" for one that isn't a release. */
+private fun appVersion(context: Context): String {
+    val info = runCatching { context.packageManager.getPackageInfo(context.packageName, 0) }.getOrNull()
+        ?: return "Unknown"
+    val debug = context.applicationInfo.flags and ApplicationInfo.FLAG_DEBUGGABLE != 0
+    return "${info.versionName} (${PackageInfoCompat.getLongVersionCode(info)})" + if (debug) " · debug build" else ""
+}
+
+/** Opens [url] in the browser. */
+private fun openLink(context: Context, url: String) {
+    try {
+        context.startActivity(Intent(Intent.ACTION_VIEW, url.toUri()).addCategory(Intent.CATEGORY_BROWSABLE))
+    } catch (_: ActivityNotFoundException) {
+        Toast.makeText(context, "No app can open this link", Toast.LENGTH_SHORT).show()
+    }
+}
+
+/** A line of information: what it is, and its value under it; with [onClick], a link. */
+@Composable
+private fun InfoRow(label: String, value: String, onClick: (() -> Unit)? = null) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .padding(horizontal = 16.dp, vertical = 10.dp),
+    ) {
+        Text(label)
+        Text(
+            value,
+            style = MaterialTheme.typography.bodySmall,
+            color = if (onClick != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

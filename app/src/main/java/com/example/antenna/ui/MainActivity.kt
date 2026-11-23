@@ -16,6 +16,9 @@ import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
+import com.example.antenna.data.OpenSource
+import com.example.antenna.data.Prefetcher
+import com.example.antenna.data.clearWatched
 import com.example.antenna.data.videoIdOf
 import com.example.antenna.data.watchUrl
 import kotlinx.coroutines.launch
@@ -82,6 +85,10 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
@@ -184,6 +191,12 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge() // the status bar icons follow dark mode
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Get the videos you're likely to open ready (it decides whether that's worth it).
+        Prefetcher.get(this).onAppOpened()
+    }
+
     override fun onStop() {
         super.onStop()
         player.onStop(changingConfigurations = isChangingConfigurations)
@@ -203,8 +216,8 @@ class MainActivity : ComponentActivity() {
         val url = link?.let(::videoIdOf)?.let(::watchUrl)
         when {
             url == null -> Toast.makeText(this, "Not a YouTube video link", Toast.LENGTH_SHORT).show()
-            fromAnotherVideo -> player.openLink(url)
-            else -> player.open(url)
+            fromAnotherVideo -> player.openLink(url, OpenSource.Link)
+            else -> player.open(url, OpenSource.Link)
         }
     }
 
@@ -232,7 +245,9 @@ internal val ChannelSaver = listSaver<Channel?, String?>(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange: (Channel?) -> Unit) {
+fun MainScreen(onOpenVideo: (String, OpenSource) -> Unit, channel: Channel?, onChannelChange: (Channel?) -> Unit) {
+    /** Opens a video, noting where from (the watch log's "Where you open videos"). */
+    fun openFrom(source: OpenSource): (String) -> Unit = { url -> onOpenVideo(url, source) }
     var tab by rememberSaveable { mutableStateOf(Tab.ForYou) }
     var overlay by rememberSaveable { mutableStateOf<Overlay?>(null) }
     /** Search (the magnifier in the top bar): shown in place of the current tab. */
@@ -259,7 +274,7 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
     // A channel's page, shown instead of the tabs.
     channel?.let { c ->
         BackHandler { onChannelChange(null) }
-        ChannelScreen(viewModel<ChannelViewModel>(), c, onBack = { onChannelChange(null) }, onOpenVideo = onOpenVideo)
+        ChannelScreen(viewModel<ChannelViewModel>(), c, onBack = { onChannelChange(null) }, onOpenVideo = openFrom(OpenSource.Channel))
         return
     }
     BackHandler(enabled = searching) { searching = false }
@@ -271,7 +286,7 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
             text = { Text("This also resets your For you recommendations.") },
             confirmButton = {
                 TextButton(onClick = {
-                    WatchHistoryStore.get(context).clear()
+                    clearWatched(context) // and what else was recorded about it (the watch log, the app's guesses)
                     confirmClearHistory = false
                 }) { Text("Clear") }
             },
@@ -295,7 +310,7 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
                 return@Scaffold
             }
             TopAppBar(
-                title = { AntennaLogo() },
+                title = { AntennaLogo(onClick = { tab = Tab.ForYou }) },
                 actions = {
                     IconButton(onClick = { searching = true }) {
                         Icon(Icons.Default.Search, contentDescription = "Search")
@@ -364,20 +379,20 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
         val modifier = Modifier.padding(padding).fillMaxSize()
         tabsState.SaveableStateProvider(if (searching) "search" else tab.name) {
             if (searching) {
-                SearchResults(viewModel<SearchViewModel>(), onOpenVideo, onOpenChannel = onChannelChange, modifier)
+                SearchResults(viewModel<SearchViewModel>(), openFrom(OpenSource.Search), onOpenChannel = onChannelChange, modifier)
                 return@SaveableStateProvider
             }
             when (tab) {
-                Tab.ForYou -> ForYouTab(viewModel<ForYouViewModel>(), onOpenVideo, modifier)
+                Tab.ForYou -> ForYouTab(viewModel<ForYouViewModel>(), openFrom(OpenSource.ForYou), modifier)
                 Tab.Subscriptions -> FeedTab(
                     vm = viewModel<FeedViewModel>(),
-                    onOpenVideo = onOpenVideo,
+                    onOpenVideo = openFrom(OpenSource.Subscriptions),
                     onOpenChannel = onChannelChange,
                     onManage = { overlay = Overlay.Channels },
                     modifier = modifier,
                 )
-                Tab.WatchLater -> WatchLaterTab(onOpenVideo, modifier)
-                Tab.History -> HistoryTab(onOpenVideo, modifier)
+                Tab.WatchLater -> WatchLaterTab(openFrom(OpenSource.WatchLater), modifier)
+                Tab.History -> HistoryTab(openFrom(OpenSource.History), modifier)
                 Tab.Analytics -> {
                     val search = viewModel<SearchViewModel>()
                     AnalyticsTab(
@@ -395,12 +410,22 @@ fun MainScreen(onOpenVideo: (String) -> Unit, channel: Channel?, onChannelChange
     }
 }
 
-/** The logo, in the top bar like YouTube's. */
+/** The logo, in the top bar like YouTube's. Tapping it goes home: the For you tab. */
 @Composable
-private fun AntennaLogo() {
+private fun AntennaLogo(onClick: () -> Unit) {
     // No background behind the TV; its cream lines turn near-black on the white bar.
     val logo = if (isSystemInDarkTheme()) R.drawable.ic_logo_dark else R.drawable.ic_logo_light
-    Image(painterResource(logo), contentDescription = "Antenna", modifier = Modifier.size(32.dp))
+    // A button's 48 dp to tap, with the logo where it was: the box starts 8 dp further left.
+    Box(
+        Modifier
+            .offset(x = (-8).dp)
+            .size(48.dp)
+            .clip(CircleShape)
+            .clickable(onClickLabel = "Go to For you", role = Role.Button, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Image(painterResource(logo), contentDescription = "Antenna", modifier = Modifier.size(32.dp))
+    }
 }
 
 /** The search's error message, for the smoke test (it tells YouTube's limits from bugs). */

@@ -1,5 +1,6 @@
 package com.example.antenna.player
 
+import android.util.Log
 import androidx.annotation.OptIn
 import androidx.media3.common.MediaItem
 import androidx.media3.common.MediaMetadata
@@ -21,6 +22,7 @@ import org.schabi.newpipe.extractor.stream.Stream
 import org.schabi.newpipe.extractor.stream.StreamInfo
 import org.schabi.newpipe.extractor.stream.StreamType
 import org.schabi.newpipe.extractor.stream.VideoStream
+import java.util.Locale
 
 /**
  * Turns a StreamInfo into something ExoPlayer can play.
@@ -62,22 +64,15 @@ object StreamPicker {
         )
 
         // Only codecs this device can decode (a stream it can't would play as audio only),
-        // and hardware decoding first: 1440p in VP9 decoded in software stutters where
-        // 1080p in H.264 plays smoothly. A quality picked in the menu comes before all that.
+        // the best of them by [order].
         val decoders = HashMap<String?, Decoding>()
-        val video = info.videoOnlyStreams
+        val candidates = info.videoOnlyStreams
             .filter { it.isPlayable() && it.shortSide in 1..maxOf(maxHeight, preferred ?: 0) }
-            .map { it to decoders.getOrPut(it.codec) { decodingOf(it.codec) } }
-            .filter { (_, decoding) -> decoding != Decoding.NONE }
-            .sortedWith(
-                compareBy<Pair<VideoStream, Decoding>> { (stream, _) -> if (stream.shortSide == preferred) 0 else 1 }
-                    .thenBy { (_, decoding) -> decoding.ordinal }
-                    .thenByDescending { (stream, _) -> stream.shortSide }
-                    // at equal height prefer H.264 (hardware decoding on nearly every phone)
-                    .thenBy { (stream, _) -> if (stream.codec?.startsWith("avc") == true) 0 else 1 }
-                    .thenByDescending { (stream, _) -> stream.fps },
-            )
-            .firstOrNull()?.first
+            .map { it to it.option(decoders.getOrPut(it.codec) { decodingOf(it.codec) }) }
+            .filter { (_, option) -> option.decoding != Decoding.NONE }
+        val best = candidates.minWithOrNull(compareBy(order(preferred)) { it.second })
+        best?.let { logChoice(it.second, candidates.map { (_, option) -> option }) }
+        val video = best?.first
 
         val audio = info.audioStreams
             .filter { it.isPlayable() }
@@ -116,6 +111,75 @@ object StreamPicker {
         return streams.map { it.shortSide }.filter { it > 0 }.distinct().sortedDescending()
     }
 
+    /** A video stream as [order] weighs it. */
+    internal data class Option(
+        val shortSide: Int,
+        val fps: Int,
+        val decoding: Decoding,
+        /** How much data it takes, from what YouTube says; null if it doesn't. */
+        val bitsPerSecond: Long?,
+        val codec: String?,
+    )
+
+    private fun VideoStream.option(decoding: Decoding) = Option(
+        shortSide = shortSide,
+        fps = fps,
+        decoding = decoding,
+        bitsPerSecond = itagItem?.let { bitsPerSecond(it.contentLength, it.approxDurationMs, it.averageBitrate) },
+        codec = codec,
+    )
+
+    /**
+     * Video streams, best first: the quality picked in the menu ([preferred]), if any; then
+     * hardware decoding (1440p in VP9 decoded in software stutters where 1080p in H.264 plays
+     * smoothly); then the best quality, and the most frames per second; and at equal quality
+     * the smallest file. That's usually AV1, but YouTube's VP9 is sometimes bigger than its
+     * H.264, so it goes by the sizes YouTube gives rather than by codec.
+     */
+    internal fun order(preferred: Int?): Comparator<Option> =
+        compareBy<Option> { if (it.shortSide == preferred) 0 else 1 }
+            .thenBy { it.decoding.ordinal }
+            .thenByDescending { it.shortSide }
+            .thenByDescending { it.fps }
+            .thenBy { it.bitsPerSecond ?: Long.MAX_VALUE }
+            .thenBy { codecRank(it.codec) }
+
+    /**
+     * A stream's bits per second: its size over its length, or else YouTube's average bitrate
+     * for it; null when neither is known.
+     */
+    internal fun bitsPerSecond(contentLength: Long, durationMs: Long, averageBitrate: Int): Long? = when {
+        contentLength > 0 && durationMs > 0 -> contentLength * 8_000 / durationMs
+        averageBitrate > 0 -> averageBitrate.toLong()
+        else -> null
+    }
+
+    /**
+     * Logs the stream picked, and what its quality would take in each codec this device can
+     * decode: "Playing 1080p60 avc1.64002A at 1.5 Mb/s; at this quality: avc1.64002A (hardware)
+     * 1.5 Mb/s, vp9 (hardware) 1.8 Mb/s, av01.0.09M.08 (software) 0.6 Mb/s".
+     */
+    private fun logChoice(picked: Option, options: List<Option>) {
+        val same = options
+            .filter { it.shortSide == picked.shortSide && it.fps == picked.fps }
+            .joinToString { "${it.codec} (${it.decoding.name.lowercase()}) ${mbps(it.bitsPerSecond)}" }
+        Log.d(TAG, "Playing ${picked.shortSide}p${picked.fps} ${picked.codec} at ${mbps(picked.bitsPerSecond)}; at this quality: $same")
+    }
+
+    private fun mbps(bitsPerSecond: Long?) =
+        if (bitsPerSecond == null) "? Mb/s" else String.format(Locale.US, "%.1f Mb/s", bitsPerSecond / 1e6)
+
+    private const val TAG = "StreamPicker"
+
+    /** Codecs by how much data they usually take for the same picture, least first: for streams of unknown size. */
+    internal fun codecRank(codec: String?): Int = when {
+        codec == null -> 3
+        codec.startsWith("av01") -> 0
+        codec.startsWith("vp09") || codec.startsWith("vp9") -> 1
+        codec.startsWith("avc") -> 2
+        else -> 3
+    }
+
     /** The shorter side: 1080 for both 1920×1080 and a vertical 1080×1920. */
     val VideoStream.shortSide: Int
         get() = if (width > 0 && height > 0) minOf(width, height) else height
@@ -124,7 +188,7 @@ object StreamPicker {
         isUrl && deliveryMethod == DeliveryMethod.PROGRESSIVE_HTTP && content.isNotEmpty()
 
     /** In order of preference. */
-    private enum class Decoding { HARDWARE, SOFTWARE, NONE }
+    internal enum class Decoding { HARDWARE, SOFTWARE, NONE }
 
     /** How this device can decode a codec, e.g. "avc1.640028", "vp09.00.40.08", "av01.0.08M.08". */
     private fun decodingOf(codec: String?): Decoding {

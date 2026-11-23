@@ -29,7 +29,10 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.grid.LazyGridScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.material3.FilterChip
+import androidx.compose.ui.unit.Dp
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
@@ -111,6 +114,8 @@ fun FeedTab(
     var picked by rememberSaveable { mutableStateOf<String?>(null) }
     // One you've unsubscribed from since counts as none.
     val selected = picked?.takeIf { url -> channels.any { it.url == url } }
+    /** Shorts instead of the other videos (the chips above the feed). */
+    var showShorts by rememberSaveable { mutableStateOf(false) }
 
     val visible = remember(state.items, watched, hideWatched, selected, channels) {
         // The feed doesn't come with avatars, but the subscriptions mostly have them.
@@ -119,6 +124,16 @@ fun FeedTab(
             .filter { selected == null || it.channelUrl == selected }
             .filterNot { v -> hideWatched && videoIdOf(v.url)?.let { it in watched } == true }
             .map { v -> if (v.channelAvatarUrl != null) v else v.copy(channelAvatarUrl = avatars[v.channelUrl]) }
+    }
+    // Shorts on their own, so they don't crowd out the videos.
+    val (shorts, videos) = remember(visible) { visible.partition { it.isShort } }
+    val feed = @Composable { m: Modifier ->
+        FeedGrid(
+            state, videos, shorts,
+            showShorts = showShorts && shorts.isNotEmpty(),
+            onShowShorts = { showShorts = it },
+            onRefresh = vm::refresh, onOpenVideo = onOpenVideo, onOpenChannel = onOpenChannel, modifier = m,
+        )
     }
     // The watched videos that have a category, for the Topic order: it changes only when one
     // is added, not with every position saved while a video plays.
@@ -184,10 +199,10 @@ fun FeedTab(
                 onSelect = { picked = it },
                 modifier = Modifier.width(280.dp).fillMaxHeight(),
             )
-            FeedGrid(state, visible, vm::refresh, onOpenVideo, onOpenChannel, Modifier.weight(1f).fillMaxHeight())
+            feed(Modifier.weight(1f).fillMaxHeight())
         }
     } else {
-        FeedGrid(state, visible, vm::refresh, onOpenVideo, onOpenChannel, modifier)
+        feed(modifier)
     }
 }
 
@@ -286,51 +301,86 @@ private fun ChannelEntry(name: String, selected: Boolean, onClick: () -> Unit, i
     }
 }
 
-/** The feed's videos, newest first, with the refresh progress and any errors above them. */
+/**
+ * The feed, newest first: its videos, or its Shorts (picked in the chips above, when there are
+ * any), with the refresh progress and any errors at the top.
+ */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun FeedGrid(
     state: FeedUiState,
-    visible: List<VideoItem>,
+    videos: List<VideoItem>,
+    shorts: List<VideoItem>,
+    showShorts: Boolean,
+    onShowShorts: (Boolean) -> Unit,
     onRefresh: () -> Unit,
     onOpenVideo: (String) -> Unit,
     onOpenChannel: (Channel) -> Unit,
     modifier: Modifier,
 ) {
     PullToRefreshBox(isRefreshing = state.refreshing, onRefresh = onRefresh, modifier = modifier) {
-        VideoGrid(Modifier.fillMaxSize()) { wide ->
-            state.progress?.let { (done, total) ->
-                fullWidthItem {
-                    Column(Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
-                        LinearProgressIndicator(
-                            progress = { if (total == 0) 0f else done.toFloat() / total },
-                            modifier = Modifier.fillMaxWidth(),
-                        )
-                        Text(
-                            "Checking channels $done / $total",
-                            style = MaterialTheme.typography.bodySmall,
-                            modifier = Modifier.padding(top = 4.dp),
-                        )
-                    }
+        Column(Modifier.fillMaxSize()) {
+            // Kept in place above the list, whichever it shows.
+            if (shorts.isNotEmpty()) VideosOrShorts(showShorts, onShowShorts, Modifier.padding(horizontal = 16.dp))
+            // The status lines in line with the list: phone rows have no room around them,
+            // the grids' cards do.
+            if (showShorts) {
+                ShortsGrid(Modifier.weight(1f)) {
+                    feedStatus(state, inset = 0.dp)
+                    shortItems(shorts, onClick = { onOpenVideo(it.url) })
+                }
+            } else {
+                VideoGrid(Modifier.weight(1f)) { wide ->
+                    feedStatus(state, inset = if (wide) 0.dp else 16.dp)
+                    videoItems(videos, wide, onClick = { onOpenVideo(it.url) }, onChannelClick = onOpenChannel)
                 }
             }
-            state.error?.let { err ->
-                fullWidthItem { Text(err, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(16.dp)) }
-            }
-            if (state.failedChannels.isNotEmpty()) {
-                fullWidthItem {
-                    Text(
-                        "Couldn't load ${state.failedChannels.size} channel(s): " +
-                            state.failedChannels.take(5).joinToString() +
-                            if (state.failedChannels.size > 5) "…" else "",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
-                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp),
-                    )
-                }
-            }
-            videoItems(visible, wide, onClick = { onOpenVideo(it.url) }, onChannelClick = onOpenChannel)
         }
+    }
+}
+
+/** How the refresh is going, and what went wrong, above the feed; [inset] from the sides. */
+private fun LazyGridScope.feedStatus(state: FeedUiState, inset: Dp) {
+    state.progress?.let { (done, total) ->
+        fullWidthItem {
+            Column(Modifier.padding(horizontal = inset, vertical = 8.dp)) {
+                LinearProgressIndicator(
+                    progress = { if (total == 0) 0f else done.toFloat() / total },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    "Checking channels $done / $total",
+                    style = MaterialTheme.typography.bodySmall,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
+        }
+    }
+    state.error?.let { err ->
+        fullWidthItem {
+            Text(err, color = MaterialTheme.colorScheme.error, modifier = Modifier.padding(horizontal = inset, vertical = 16.dp))
+        }
+    }
+    if (state.failedChannels.isNotEmpty()) {
+        fullWidthItem {
+            Text(
+                "Couldn't load ${state.failedChannels.size} channel(s): " +
+                    state.failedChannels.take(5).joinToString() +
+                    if (state.failedChannels.size > 5) "…" else "",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = inset, vertical = 4.dp),
+            )
+        }
+    }
+}
+
+/** Videos or Shorts: the feed shows one or the other, so Shorts don't crowd out the rest. */
+@Composable
+private fun VideosOrShorts(showShorts: Boolean, onShowShorts: (Boolean) -> Unit, modifier: Modifier = Modifier) {
+    Row(modifier.padding(vertical = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+        FilterChip(selected = !showShorts, onClick = { onShowShorts(false) }, label = { Text("Videos") })
+        FilterChip(selected = showShorts, onClick = { onShowShorts(true) }, label = { Text("Shorts") })
     }
 }
 
