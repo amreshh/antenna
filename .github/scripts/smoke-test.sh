@@ -25,7 +25,8 @@ set -uo pipefail
 apk=${APK:?set APK to the APK to test}
 summary=${SUMMARY:-smoke-summary.md}
 shots=${SCREENSHOTS:-smoke-screenshots}
-pkg=com.example.antenna
+pkg=com.example.antenna # the app's id; its code is in com.antenna
+main=com.antenna.ui.MainActivity
 video=${VIDEO:-https://www.youtube.com/watch?v=dQw4w9WgXcQ} # public, and up for 15+ years
 query=${QUERY:-rick astley}
 startup_budget=${STARTUP_BUDGET_MS:-4000}
@@ -103,7 +104,7 @@ starts() {
   local out time
   "$adb" shell am force-stop "$pkg"
   "$adb" logcat -c
-  out=$("$adb" shell am start -W -n "$pkg/.ui.MainActivity" 2>&1 | tr -d '\r')
+  out=$("$adb" shell am start -W -n "$pkg/$main" 2>&1 | tr -d '\r')
   time=$(sed -n 's/^TotalTime: *\([0-9]*\)$/\1/p' <<< "$out")
   [ "${time:-0}" -gt 0 ] && note="in $time ms"
   sleep 3
@@ -128,7 +129,7 @@ home_screen() {
 player() {
   local xml title error
   # Opened the way a link from another app opens it (the app is already running).
-  "$adb" shell am start -W -a android.intent.action.VIEW -d "$video" -n "$pkg/.ui.MainActivity" > /dev/null 2>&1
+  "$adb" shell am start -W -a android.intent.action.VIEW -d "$video" -n "$pkg/$main" > /dev/null 2>&1
   for _ in $(seq 30); do
     sleep 2
     if crashed || ! running; then
@@ -304,7 +305,7 @@ cold_start() {
   for _ in 1 2 3 4 5; do
     "$adb" shell am force-stop "$pkg"
     sleep 1
-    out=$("$adb" shell am start -W -n "$pkg/.ui.MainActivity" 2>&1 | tr -d '\r')
+    out=$("$adb" shell am start -W -n "$pkg/$main" 2>&1 | tr -d '\r')
     t=$(sed -n 's/^TotalTime: *\([0-9]*\)$/\1/p' <<< "$out")
     [ -n "$t" ] || { note="am start gave no time"; return 1; }
     times+=("$t")

@@ -27,13 +27,13 @@ import subprocess
 import sys
 from pathlib import Path
 
-PACKAGE = "com.example.antenna"
+PACKAGE = "com.example.antenna"  # the app's id (its code is in com.antenna, below)
 ALLOWED_PERMISSIONS = {
     "android.permission.INTERNET",
     "android.permission.ACCESS_NETWORK_STATE",  # added by a library (OkHttp/Media3)
     f"{PACKAGE}.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION",  # AndroidX core, signature-level
 }
-MAIN_SCREEN = f"{PACKAGE}.ui.MainActivity"
+MAIN_SCREEN = "com.antenna.ui.MainActivity"
 # Exported components other than the main screen are fine only behind one of these.
 SYSTEM_PERMISSIONS = {"android.permission.DUMP"}  # e.g. AndroidX's ProfileInstallReceiver
 SIGNATURE = 0x2  # android:protectionLevel="signature"

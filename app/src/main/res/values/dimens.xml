@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The video's controls (layout/exo_player_control_view.xml, Media3's layout changed): no dark
+  bar along the bottom, but the time and the buttons in pills, like YouTube's, with the seek
+  bar just above them. Media3 reads its sizes (exo_…) for its layout and for its show and hide
+  animations alike, so the two stay in step. (Lint sees nothing in the app use those: Media3's
+  layout and code do.)
+-->
+<resources xmlns:tools="http://schemas.android.com/tools" tools:ignore="UnusedResources">
+    <!-- The pills: as tall as their buttons. -->
+    <dimen name="player_controls_pill_height">36dp</dimen>
+
+    <!-- The row they're in, 4 dp above and below them. -->
+    <dimen name="exo_styled_bottom_bar_height" tools:override="true">44dp</dimen>
+    <!-- The seek bar, right above the pills (its touch area ending where they start). -->
+    <dimen name="exo_styled_progress_margin_bottom" tools:override="true">40dp</dimen>
+    <dimen name="exo_styled_progress_layout_height" tools:override="true">36dp</dimen>
+    <!-- The buttons in the pill: Media3's 24 dp icons, in less height. -->
+    <dimen name="exo_small_icon_height" tools:override="true">36dp</dimen>
+    <dimen name="exo_small_icon_padding_vertical" tools:override="true">6dp</dimen>
+</resources>
