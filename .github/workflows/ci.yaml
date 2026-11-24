@@ -16,7 +16,7 @@ name: ci
 #                  APK is built here (and smoke-tested) only when there's no
 #                  tested one: the pull request came from a fork, wasn't up to
 #                  date with main, or its run failed or its APK expired (after
-#                  90 days).
+#                  30 days).
 #   push to dev    nothing: work in progress is checked by its pull request
 #   tag v1.2.3     every check, then that version built and released (manual;
 #                  the tag must be on main). A tag like v1.2.3-rc1 is a
@@ -561,8 +561,9 @@ jobs:
           retention-days: 7
 
       # Named after the code it's built from, so main can find it once this is
-      # merged. Pull requests keep it 90 days (GitHub's limit): merged later,
-      # main builds its own.
+      # merged. Pull requests keep it 30 days, the most this repository allows
+      # (Settings → Actions → General → Artifact and log retention; asking for
+      # more only gets a warning): merged later, main builds its own.
       - name: Keep the APK
         id: keep
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -570,7 +571,7 @@ jobs:
           name: apk-${{ needs.plan.outputs.code }}
           path: dist/
           if-no-files-found: error
-          retention-days: ${{ github.event_name == 'pull_request' && 90 || 7 }}
+          retention-days: ${{ github.event_name == 'pull_request' && 30 || 7 }}
           overwrite: true # a re-run replaces it
 
   # The APK on an emulator (.github/scripts/smoke-test.sh): it installs and

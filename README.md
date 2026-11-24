@@ -274,7 +274,7 @@ everything, and merging it releases exactly what it built and tested
   area (`.github/labeler.yaml`) above GitHub's generated list of pull requests. `main` only
   builds (and smoke-tests) an APK itself when there's no tested one to take: a pull request
   from a fork, one that wasn't up to date with `main`, or one whose run failed or whose APK
-  expired (after 90 days).
+  expired (after 30 days, the most the repository's settings keep artifacts).
 - **Version:** each release bumps the patch. Put `#minor` or `#major` in the pull request's
   title or in a commit message to bump that instead; the pull request comment shows which
   version merging releases. The first release is the `versionName` in
