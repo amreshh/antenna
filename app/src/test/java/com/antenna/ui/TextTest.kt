@@ -4,6 +4,7 @@ import org.junit.Assert.assertEquals
 import org.junit.Test
 import org.schabi.newpipe.extractor.exceptions.AgeRestrictedContentException
 import org.schabi.newpipe.extractor.exceptions.ContentNotAvailableException
+import org.schabi.newpipe.extractor.exceptions.ParsingException
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
 import java.net.UnknownHostException
 
@@ -47,6 +48,11 @@ class TextTest {
             "This video is age-restricted, which needs a signed-in account.",
             AgeRestrictedContentException("age").readable(),
         )
+        assertEquals(
+            "YouTube is limiting requests from this network. Wait a while, or switch networks.",
+            ParsingException("Got HTML document, expected JSON response (latest url was: \"https://youtubei.googleapis.com/youtubei/v1/player\")").readable(),
+        )
+        assertEquals("ParsingException: Could not get title", ParsingException("Could not get title").readable())
         assertEquals(
             "Can't reach YouTube. Check your internet connection.",
             UnknownHostException("www.youtube.com").readable(),

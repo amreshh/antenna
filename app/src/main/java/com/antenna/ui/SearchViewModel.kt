@@ -18,6 +18,7 @@ import org.schabi.newpipe.extractor.exceptions.ContentNotAvailableException
 import org.schabi.newpipe.extractor.exceptions.GeographicRestrictionException
 import org.schabi.newpipe.extractor.exceptions.PaidContentException
 import org.schabi.newpipe.extractor.exceptions.PrivateContentException
+import org.schabi.newpipe.extractor.exceptions.ParsingException
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
 import org.schabi.newpipe.extractor.exceptions.SignInConfirmNotBotException
 import java.net.ConnectException
@@ -138,10 +139,13 @@ class SearchViewModel : ViewModel() {
  */
 private fun List<VideoItem>.newestFirst(): List<VideoItem> = sortedByDescending { it.uploadedAtMs }
 
+private const val LIMITED = "YouTube is limiting requests from this network. Wait a while, or switch networks."
+
 /** An error message for people, for the errors YouTube and the network commonly cause. */
 internal fun Throwable.readable(): String = when (this) {
-    is ReCaptchaException, is SignInConfirmNotBotException ->
-        "YouTube is limiting requests from this network. Wait a while, or switch networks."
+    is ReCaptchaException, is SignInConfirmNotBotException -> LIMITED
+    // A web page where its API's JSON should be: what YouTube sends a network it's blocking.
+    is ParsingException if message.orEmpty().startsWith("Got HTML document") -> LIMITED
     is AgeRestrictedContentException -> "This video is age-restricted, which needs a signed-in account."
     is GeographicRestrictionException -> "This video isn't available in your country."
     is PaidContentException -> "This video is only for paying members."
