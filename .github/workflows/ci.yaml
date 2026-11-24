@@ -3,7 +3,7 @@ name: ci
 # Like amreshh/wirepulse: a pull request builds and checks everything, and
 # merging it releases exactly what it built and tested.
 #
-#   pull request   unit tests, Android lint, the workflow checks (actionlint,
+#   pull request   unit tests (and their code coverage), Android lint, the workflow checks (actionlint,
 #                  zizmor) and the dependency scan (known vulnerabilities, from
 #                  osv.dev) side by side, and the release APK: built with R8 and
 #                  the version merging would release, its security settings
@@ -16,8 +16,8 @@ name: ci
 #                  APK is built here (and smoke-tested) only when there's no
 #                  tested one: the pull request came from a fork, wasn't up to
 #                  date with main, or its run failed or its APK expired (after
-#                  90 days).
-#   push to dev    unit tests and the APK, to try out
+#                  30 days).
+#   push to dev    nothing: work in progress is checked by its pull request
 #   tag v1.2.3     every check, then that version built and released (manual;
 #                  the tag must be on main). A tag like v1.2.3-rc1 is a
 #                  pre-release.
@@ -52,10 +52,12 @@ name: ci
 # A release without them fails rather than ship an APK signed with a throwaway key.
 #
 # Caches: only runs on main save the Gradle cache (CodeQL's do); pull requests
-# and dev pushes only restore it, so nothing a pull request does reaches it.
+# only restore it, so nothing a pull request does reaches it.
 on:
   push:
-    branches: [dev, main]
+    # main only: a merged pull request, to release. Pushes to dev are work in
+    # progress; their pull request runs the checks.
+    branches: [main]
     # Version-shaped tags only, so a stray tag like "vtest" never triggers a release.
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
   pull_request:
@@ -157,7 +159,7 @@ jobs:
               version=$(next "$(git log --format=%B "${last:+$last..}HEAD")")
               ;;
             *)
-              # dev pushes and manual runs: an APK to try out
+              # manual runs: an APK to try out
               version=$(next "")
               ;;
           esac
@@ -246,6 +248,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # Pull requests: the test merge and its parents, the first being the base
+          # branch, for the code coverage's comparison.
+          fetch-depth: 2
           persist-credentials: false
 
       # The JDK that runs Gradle: the version gradle/gradle-daemon-jvm.properties
@@ -276,6 +281,50 @@ jobs:
         with:
           name: scan-summary-tests
           path: ${{ runner.temp }}/tests-summary.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+      # How much of the code the tests run (JaCoCo, enabled in app/build.gradle.kts):
+      # a table in the run summary and the pull request comment, and the whole report,
+      # down to each line, as the coverage-report artifact. Only when the tests passed.
+      # Pull requests also measure the base branch's code (the test merge's first
+      # parent, in a worktree beside this one) to say whether the coverage went up or
+      # down, and how much of what the pull request adds or changes the tests run.
+      - name: Code coverage
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          ./gradlew createDebugUnitTestCoverageReport
+          report=app/build/reports/coverage/test/debug/report.xml
+          args=()
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            base="$RUNNER_TEMP/base"
+            git worktree add --detach "$base" HEAD^1
+            if (cd "$base" && ./gradlew --quiet createDebugUnitTestCoverageReport); then
+              args+=(--base "$base/$report")
+            else
+              echo "::notice::No coverage of $BASE_REF to compare with: it doesn't measure it yet, or its tests failed"
+            fi
+            git diff --unified=0 --no-color --find-renames HEAD^1 HEAD -- app/src/main/java > "$RUNNER_TEMP/changes.diff"
+            args+=(--base-name "$BASE_REF" --diff "$RUNNER_TEMP/changes.diff")
+          fi
+          python3 -I .github/scripts/coverage-summary.py "$report" "${args[@]}" > "$RUNNER_TEMP/coverage-summary.md"
+          cat "$RUNNER_TEMP/coverage-summary.md" >> "$GITHUB_STEP_SUMMARY"
+
+      - if: ${{ !cancelled() && github.event_name == 'pull_request' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-summary-coverage
+          path: ${{ runner.temp }}/coverage-summary.md
+          if-no-files-found: ignore
+          retention-days: 7
+
+      - name: Coverage report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: coverage-report
+          path: app/build/reports/coverage/test/debug/
           if-no-files-found: ignore
           retention-days: 7
 
@@ -512,8 +561,9 @@ jobs:
           retention-days: 7
 
       # Named after the code it's built from, so main can find it once this is
-      # merged. Pull requests keep it 90 days (GitHub's limit): merged later,
-      # main builds its own.
+      # merged. Pull requests keep it 30 days, the most this repository allows
+      # (Settings → Actions → General → Artifact and log retention; asking for
+      # more only gets a warning): merged later, main builds its own.
       - name: Keep the APK
         id: keep
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
@@ -521,17 +571,17 @@ jobs:
           name: apk-${{ needs.plan.outputs.code }}
           path: dist/
           if-no-files-found: error
-          retention-days: ${{ github.event_name == 'pull_request' && 90 || 7 }}
+          retention-days: ${{ github.event_name == 'pull_request' && 30 || 7 }}
           overwrite: true # a re-run replaces it
 
   # The APK on an emulator (.github/scripts/smoke-test.sh): it installs and
   # starts, the home screen shows, the player loads a video and minimizes,
   # search finds videos and opens a channel, nothing crashes; and cold start and
   # memory stay within their budgets.
-  # Everywhere the APK is built, except dev pushes.
+  # Everywhere the APK is built.
   smoke:
     needs: [plan, build]
-    if: needs.build.result == 'success' && !(github.event_name == 'push' && github.ref == 'refs/heads/dev')
+    if: needs.build.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -624,9 +674,8 @@ jobs:
         with:
           persist-credentials: false
 
-      # The tables: tests, lint, zizmor, dependencies, APK, APK security, smoke
-      # test. One is missing when its
-      # job didn't get that far.
+      # The tables: tests, code coverage, lint, zizmor, dependencies, APK, APK
+      # security, smoke test. One is missing when its job didn't get that far.
       - name: Get the tables
         continue-on-error: true
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

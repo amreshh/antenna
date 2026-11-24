@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<resources>
+<resources xmlns:tools="http://schemas.android.com/tools">
     <string name="app_name">Antenna</string>
+    <!-- Between the time into the video and its length, like YouTube's "0:18 / 8:10". -->
+    <string name="player_time_separator" translatable="false" tools:ignore="UnusedResources">/</string>
 </resources>

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # The pull request comment: what merging does, each check's result, and the
-# tables the jobs left behind (*-summary.md in the current folder: tests, apk,
-# apk-security, smoke, lint, zizmor, deps). The ci workflow's report job runs it and posts the
+# tables the jobs left behind (*-summary.md in the current folder: tests,
+# coverage, apk, apk-security, smoke, lint, zizmor, deps). The ci workflow's report job runs it and posts the
 # result, updating its earlier comment (found by the first line, a marker).
 #
 #   ci-report.sh > comment.md
@@ -71,6 +71,7 @@ section apk-security-summary.md "$(open_unless_passed "$BUILD")"
 section smoke-summary.md open
 section deps-summary.md "$(open_unless_passed "$DEPS")"
 section tests-summary.md "$(open_unless_passed "$TEST")"
+section coverage-summary.md open
 section lint-summary.md "$(open_unless_passed "$LINT")"
 section zizmor-summary.md "$(open_unless_passed "$WORKFLOWS")"
 

@@ -5,7 +5,10 @@ plugins {
 }
 
 android {
-    namespace = "com.example.antenna"
+    // The code's package (and R's). The app's id, applicationId below, stays com.example.antenna:
+    // a new one would make Android treat it as another app, which doesn't install over the one
+    // people have (and their history and subscriptions stay with that one).
+    namespace = "com.antenna"
     // Android 17 QPR2 (API 37.2): Compose 1.13 needs at least 37.1 to compile against.
     compileSdk {
         version = release(37) { minorApiLevel = 2 }
@@ -47,6 +50,13 @@ android {
     }
 
     buildTypes {
+        debug {
+            // Code coverage of the unit tests (JaCoCo, built into the Android Gradle plugin):
+            // ./gradlew createDebugUnitTestCoverageReport writes it to
+            // app/build/reports/coverage/test/debug/. CI puts it in the pull request's
+            // comment, with how it changed from the base branch (.github/scripts/coverage-summary.py).
+            enableUnitTestCoverage = true
+        }
         release {
             // R8 removes the unused parts of the libraries (most of Compose, Material and
             // Media3), which makes the APK a fraction of the size and Compose noticeably

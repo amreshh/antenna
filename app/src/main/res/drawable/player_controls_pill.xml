@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Behind the video's buttons and its time: a dark, see-through pill, like YouTube's. -->
+<!-- (Lint: only Media3's controls, layout/exo_player_control_view.xml, use it.) -->
+<shape xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:shape="rectangle"
+    tools:ignore="UnusedResources">
+    <solid android:color="#73000000"/>
+    <corners android:radius="18dp"/>
+</shape>

@@ -60,16 +60,20 @@
 - **The player:** title, channel with a Subscribe button, and the description (views, date,
   tap for the full text). Timestamps in the description jump to that point, links to other
   videos open in Antenna, and other links in your browser. On phones the video goes
-  fullscreen when you turn sideways. On tablets the video and its details sit next to
-  Up next, and fullscreen is a button on the player, like YouTube. A video never plays the
-  next one on its own, and it pauses for calls and when you unplug your headphones.
+  fullscreen when you turn sideways. On tablets the video, with rounded corners, and its
+  details sit next to Up next, and fullscreen is a button on the player, like YouTube. A video never plays the
+  next one on its own, and it pauses for calls and when you unplug your headphones. While the
+  controls are hidden, a thin line along the bottom of the video shows how far in you are,
+  with the sponsor segments in green.
 - **Mini player, like YouTube:** swipe the video down (or press Back) and it shrinks into a
   bar above the tabs (on tablets, a floating video in the bottom corner) and keeps playing
   while you search and browse. Tap it or swipe it up to bring it back; it has play/pause and
   close buttons. Leaving the app pauses it.
-- **Quality picker** on the video (top right, with the controls): Auto plays the best quality
-  up to the max set in Settings and shows which one is playing, or pick any quality the video
-  has, for that video. It carries on from the same spot.
+- **The controls, like YouTube's:** no dark bar along the bottom of the video, but the time in a
+  pill on the left, and ⚙ and fullscreen in one on the right, under the seek bar. **⚙** opens
+  **Quality**, where Auto plays the best quality up to the max set in Settings and shows which
+  one is playing, or pick any quality the video has, for that video (it carries on from the same
+  spot); and **Playback speed**, from 0.25× to 2×, which stays for the next videos.
 - **Resume where you left off.**
 - **Keeps playing through YouTube's hiccups:** a video server that's briefly busy (HTTP 503) or
   a dropped connection is retried for about 20 seconds; a refused or expired link (YouTube's
@@ -81,7 +85,9 @@
   buffers 15–30 seconds ahead rather than 50, so less is wasted when you leave a video early,
   and starts playing once 1 second is buffered. Back through Up next reuses the details it
   already has. The Subscriptions feed isn't loaded again within 15 minutes, and a channel whose
-  feed and page both failed isn't sent to its (much bigger) page again for a day.
+  feed and page both failed isn't sent to its (much bigger) page again for a day. The feed has
+  no video lengths, so they're fetched from each channel's Videos tab (about 45 KB) only for
+  videos on screen, once per channel, and kept with the feed.
 - **Likely videos start sooner:** most of the wait when a video starts is fetching its details
   and links, so when the app opens it guesses up to 3 videos you're likely to watch (one you
   didn't finish, the newest in Watch later, the top of For you, new uploads, and the next video
@@ -104,10 +110,13 @@
   all its videos.
 - **Subscriptions with no account:** tap Subscribe on any video. The Subscriptions tab shows the
   newest uploads from all your channels (pull down to refresh). It opens straight away with the
-  feed as it last loaded, while the fresh one loads. Shorts are kept apart: the feed shows the
+  feed as it last loaded, while the fresh one loads. Videos show their length, like everywhere
+  else. Shorts are kept apart: the feed shows the
   other videos, and the Shorts chip above them shows the Shorts, in a grid of tall
   thumbnails. On tablets your channels are
-  listed beside them, by newest activity, A–Z or topic; tap one to see only its videos. Import your existing YouTube
+  listed beside them, by newest activity, A–Z or topic; tap one to see only its videos. A blue
+  dot, like YouTube's, marks a channel with an upload from the last week that wasn't there yet
+  when you last opened it in that list. Import your existing YouTube
   subscriptions from Google Takeout ([below](#importing-your-youtube-subscriptions)), and export
   them as the same kind of file.
 - **Subscriptions cleanup** (Subscriptions → ✏️ → ⋮ → Clean up): checks every channel, then
@@ -115,13 +124,14 @@
   months to 5 years), each with its reason, before removing anything. Untick a channel to keep
   it; channels that couldn't be checked are always kept.
 - **Analytics** tab: what your watch history says, worked out on the phone. Videos, watch
-  time, channels and how many you finish; watch time per day for the last 30 days; your top
-  channels; what SponsorBlock skipped for you (the time, and which kinds: sponsors, self
-  promotion…); the hours you watch; and how far you get into videos. **Topics**: what you
-  watch about, from video titles and the uploaders' tags, and YouTube's categories (saved with
-  each video you watch).
-  **Tap any bar** to narrow the whole tab to its videos: a day, an hour, a channel, a topic, a
-  kind of skipped segment… Picks in different cards combine. The bar at the top lists them
+  time, channels and how many you finish; **watch time** in one chart, by day for the last 30
+  days at first: pinch to zoom in to the hours you watch at, or out to weeks, and drag to go
+  back through your history; your top channels; what SponsorBlock skipped for you (the time,
+  and which kinds: sponsors, self promotion…); and how far you get into videos. **Topics**:
+  what you watch about, from video titles and the uploaders' tags, and YouTube's categories
+  (saved with each video you watch).
+  **Tap any bar** to narrow the whole tab to its videos: a day, an hour of a day, a channel, a
+  topic, a kind of skipped segment… Picks in different cards combine. The bar at the top lists them
   (with Open channel, or Search for a topic); × or Back takes one off. **Ready before you
   tapped**: how many of the videos you opened the app had ready, how often each kind of guess
   was opened, and what it fetches now.
@@ -146,7 +156,8 @@
 - **History, like YouTube:** a red progress bar under every thumbnail you've started, "WATCHED"
   near the end, and a History tab. Watched videos can be hidden from the Subscriptions feed.
 - **Tablets and foldables:** the lists become a grid of large thumbnails, with more columns
-  the wider the window.
+  the wider the window, and the tabs along the bottom sit together in the middle. Tapping the
+  tab you're on again takes its list back to the top, on any screen.
 
 | | | |
 |---|---|---|
@@ -227,9 +238,17 @@ everything, and merging it releases exactly what it built and tested
 
 - **Pull requests** run these side by side:
   - **Unit tests** (`app/src/test`): For you's recommendations, the Analytics numbers and
-    picks, guessing which videos to get ready and keeping score, links and the Takeout import,
-    counts, durations and error messages, which stream plays, the seek bar's segment markers,
-    and timing tests that build For you and Analytics from a full history.
+    picks, the watch time chart's bars, scale, labels and zooming, guessing which videos to
+    get ready and keeping score, links and the Takeout import, the Subscriptions feed's blue
+    dots and video lengths, counts, durations, speeds and error messages, which stream plays,
+    the seek bar's segment markers, and timing tests that build For you and Analytics from a
+    full history.
+  - **Code coverage** of those tests (JaCoCo, `./gradlew createDebugUnitTestCoverageReport`
+    locally): how much of the app's code they run, in all and by package, whether that went
+    up or down from the base branch (whose code is measured too), and how much of what the
+    pull request adds or changes they run, with the files where they don't
+    (`.github/scripts/coverage-summary.py`). The whole report, down to each line, is the
+    run's `coverage-report` artifact.
   - **Android lint**, and the **workflow checks** (actionlint, zizmor).
   - **Dependency vulnerabilities**: every library in the release APK, at the version
     Gradle resolves, checked against [osv.dev](https://osv.dev)
@@ -255,7 +274,7 @@ everything, and merging it releases exactly what it built and tested
   area (`.github/labeler.yaml`) above GitHub's generated list of pull requests. `main` only
   builds (and smoke-tests) an APK itself when there's no tested one to take: a pull request
   from a fork, one that wasn't up to date with `main`, or one whose run failed or whose APK
-  expired (after 90 days).
+  expired (after 30 days, the most the repository's settings keep artifacts).
 - **Version:** each release bumps the patch. Put `#minor` or `#major` in the pull request's
   title or in a commit message to bump that instead; the pull request comment shows which
   version merging releases. The first release is the `versionName` in
@@ -306,13 +325,14 @@ everything, and merging it releases exactly what it built and tested
 ## Project layout
 
 ```
-app/src/main/java/com/example/antenna/
+app/src/main/java/com/antenna/
 ├── App.kt                        sets up the shared OkHttp client + NewPipe.init
 ├── net/OkHttpDownloader.kt       HTTP layer used by NewPipeExtractor
 ├── data/YouTubeRepository.kt     search, pagination, stream info
 ├── data/Prefs.kt                 settings (skip categories, max quality)
 ├── data/Subscriptions.kt         local subscription store + Takeout CSV import
 ├── data/FeedRepository.kt        builds the feed (channel RSS, falls back to the Videos tab)
+├── data/NewUploads.kt            which uploads you've seen: the channel list's blue dots
 ├── data/WatchHistory.kt          watch progress + saved "up next" lists (local JSON file)
 ├── data/Recommender.kt           ranks the For you tab from your history
 ├── player/StreamPicker.kt        picks the best video-only + audio stream and merges them
@@ -326,8 +346,11 @@ app/src/main/java/com/example/antenna/
 └── ui/                           Compose screens: search, subscriptions feed, channel list,
                                   settings, VideoLayouts.kt (phone rows / tablet grid), and
                                   the player: PlayerViewModel.kt (playback, skip loop,
-                                  Subscribe), PlayerScreen.kt (the screen, drawn over the tabs),
-                                  MiniPlayer.kt (swiping it down into the mini player)
+                                  Subscribe), PlayerScreen.kt (the screen, drawn over the tabs,
+                                  and its ⚙ menu), MiniPlayer.kt (swiping it down into the mini
+                                  player), and WatchTimeChart.kt (Analytics' zoomable chart)
+app/src/main/res/layout/exo_player_control_view.xml   the video's controls (Media3's layout,
+                                  changed: the time and buttons in pills), sizes in values/dimens.xml
 art/logo.svg                      the logo; the launcher icon (res/drawable) is made from it
 .github/                          CI, release, CodeQL, Dependabot, labeler
 ```
