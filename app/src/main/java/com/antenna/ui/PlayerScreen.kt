@@ -138,6 +138,8 @@ sealed interface PlayerUiState {
         val subscribers: String = "",
         /** null while the SponsorBlock lookup is still running */
         val segments: List<Segment>?,
+        /** SponsorBlock couldn't be reached, even after trying again: nothing is skipped ([segments] is empty). */
+        val segmentsFailed: Boolean = false,
         /** How long the video is, as YouTube says; 0 for live streams. */
         val durationMs: Long = 0,
         /** YouTube's "up next" recommendations for this video */
@@ -237,6 +239,7 @@ internal fun PlayerSheet(
                     VideoDetails(
                         state, isSubscribed, vm::toggleSubscribe, vm::watchSegment, onLink, onOpenChannel,
                         savedForLater = savedForLater, onToggleWatchLater = vm::toggleWatchLater,
+                        onRetrySegments = vm::retrySegments,
                     )
                 }
             }
@@ -788,6 +791,7 @@ private fun VideoDetails(
     onOpenChannel: (Channel) -> Unit,
     savedForLater: Boolean,
     onToggleWatchLater: () -> Unit,
+    onRetrySegments: () -> Unit,
 ) {
     Text(state.title, style = MaterialTheme.typography.titleMedium, modifier = Modifier.testTag(TAG_TITLE))
     Row(
@@ -861,6 +865,10 @@ private fun VideoDetails(
     )
     val segments = state.segments
     when {
+        state.segmentsFailed -> Column {
+            Text("Couldn't reach SponsorBlock, so nothing is skipped in this video.")
+            TextButton(onClick = onRetrySegments, contentPadding = PaddingValues(0.dp)) { Text("Try again") }
+        }
         segments == null -> Text("Looking up segments…")
         segments.isEmpty() -> Text("No segments to skip in this video.")
         else -> {

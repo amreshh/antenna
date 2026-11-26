@@ -7,10 +7,11 @@
 #   ci-report.sh > comment.md
 #
 # Environment: SHA (the pull request's head commit), BASE (its base branch),
-# VERSION (what merging releases), the jobs' results (TEST, LINT, WORKFLOWS,
-# DEPS, BUILD, SMOKE: success, failure, cancelled or skipped), APK_URL (the APK
-# artifact), RUN_URL, PR (its number), and GITHUB_SERVER_URL and
-# GITHUB_REPOSITORY as GitHub Actions sets them.
+# VERSION (what merging releases), CHANGED (false when it changes only the
+# docs, which skips the jobs that build and check the app), the jobs' results
+# (TEST, LINT, WORKFLOWS, DEPS, BUILD, SMOKE: success, failure, cancelled or
+# skipped), APK_URL (the APK artifact), RUN_URL, PR (its number), and
+# GITHUB_SERVER_URL and GITHUB_REPOSITORY as GitHub Actions sets them.
 set -euo pipefail
 
 icon() {
@@ -50,6 +51,8 @@ echo "## CI for ${SHA:0:7}"
 echo
 if [ "$BASE" != main ]; then
   echo "This goes into \`$BASE\`: merging it releases nothing."
+elif [ "${CHANGED:-true}" != true ]; then
+  echo "Only the docs change: merging this releases nothing, so the app wasn't built or checked."
 elif [ "$all_passed" = true ]; then
   echo "Merging this into \`main\` releases **v$VERSION**: this APK, signed with the release key. Nothing is rebuilt."
 else

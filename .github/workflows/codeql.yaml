@@ -16,7 +16,8 @@ name: codeql
 # the codeql-action pins (Dependabot does) or wait for a release that knows it.
 #
 # On main, this also saves Gradle's downloads to the Actions cache, which the
-# ci workflow's pull request and dev builds restore. (Releases use no cache.)
+# ci workflow's jobs restore: pull requests, tags, and main when it builds the
+# APK itself (which saves it too).
 on:
   push:
     branches: [main]
@@ -37,6 +38,7 @@ jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
       security-events: write # upload the results
