@@ -35,6 +35,7 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.drawText
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
+import com.antenna.data.formatWatchTime
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import java.time.LocalDate
@@ -58,18 +59,22 @@ internal const val MIN_SPAN_HOURS = 12.0
 /** The most it can show at once, zoomed all the way out (the rest is a drag away). */
 internal const val MAX_SPAN_HOURS = 365 * 24.0
 
-/** What it shows at first, up to today. */
-internal const val DEFAULT_SPAN_HOURS = 30 * 24.0
+/** Bars are hours only when it shows this many hours or fewer (3 days): wider than that, days read better. */
+internal const val HOURS_UP_TO = 72.0
 
 /** Bars are at least this wide, gaps included: zoomed out further, they become days, then weeks. */
 private val MinSlot = 5.dp
 
 /**
- * The bars for [spanHours] across [widthPx] (at [minSlotPx]): hours while they're wide
- * enough, then days, then weeks.
+ * The bars for [spanHours] across [widthPx] (at [minSlotPx]): hours when zoomed in to
+ * [HOURS_UP_TO] or fewer and they're wide enough, then days while they're wide enough, then
+ * weeks.
  */
-internal fun stepFor(spanHours: Double, widthPx: Float, minSlotPx: Float): Step =
-    Step.entries.firstOrNull { widthPx * it.hours / spanHours >= minSlotPx } ?: Step.Week
+internal fun stepFor(spanHours: Double, widthPx: Float, minSlotPx: Float): Step = when {
+    spanHours <= HOURS_UP_TO && widthPx / spanHours >= minSlotPx -> Step.Hour
+    widthPx * 24 / spanHours >= minSlotPx -> Step.Day
+    else -> Step.Week
+}
 
 /** The epoch day of the Monday of [day]'s week. */
 internal fun mondayOf(day: Long): Long = day - Math.floorMod(day - 4, 7L) // day 4 (5 Jan 1970) was a Monday
@@ -176,8 +181,8 @@ internal class TimeWindow(start: Double, span: Double) {
         return start != before
     }
 
-    /** Whether it shows the last [DEFAULT_SPAN_HOURS], as it does at first. */
-    val isDefault: Boolean get() = abs(span - DEFAULT_SPAN_HOURS) < 0.5 && abs(end - last) < 0.5
+    /** Whether it shows the last [span] hours, up to [last]: as it does at first. */
+    fun showsLast(span: Double): Boolean = abs(this.span - span) < 0.5 && abs(end - last) < 0.5
 
     companion object {
         /** Kept across rotation, and while the tab is in the background: where it was, and how far zoomed. */
@@ -199,13 +204,15 @@ internal suspend fun TimeWindow.animateTo(start: Double, span: Double) {
 internal data class Tick(val at: Double, val text: String)
 
 private val dayFormat = DateTimeFormatter.ofPattern("MMM d")
+private val weekdayFormat = DateTimeFormatter.ofPattern("EEE d")
 private val monthFormat = DateTimeFormatter.ofPattern("MMM")
 private val yearFormat = DateTimeFormatter.ofPattern("yyyy")
 
 /**
  * The labels under bars of [step] from [start] to [end] (hour indexes), at least [minGap] hours
- * apart: hours of the day ("6:00", with the date at midnight), days ("Nov 24"), or the first of
- * the months (with the year for January). Only those whose spot is in view.
+ * apart: hours of the day ("6:00", with the date at midnight), days ("Mon 24" when every day
+ * has one, else "Nov 24"), or the first of the months (with the year for January). Only those
+ * whose spot is in view.
  */
 internal fun ticks(step: Step, start: Double, end: Double, minGap: Double): List<Tick> =
     allTicks(step, start, end, minGap).filter { it.at in start..end }
@@ -233,7 +240,7 @@ private fun allTicks(step: Step, start: Double, end: Double, minGap: Double): Li
                         else -> Math.floorMod(d, every.toLong()) == 0L
                     }
                 }
-                .map { d -> Tick(d * 24 + 12.0, date(d).format(dayFormat)) }
+                .map { d -> Tick(d * 24 + 12.0, date(d).format(if (every == 1) weekdayFormat else dayFormat)) }
         }
         else -> {
             // The first of every month, or of every few, at least minGap apart.
@@ -313,7 +320,8 @@ internal fun WatchTimeChart(
                 awaitEachGesture {
                     val down = awaitFirstDown(requireUnconsumed = false)
                     fling?.cancel()
-                    val width = size.width.toFloat().coerceAtLeast(1f)
+                    val gutter = AxisWidth.toPx()
+                    val width = (size.width - gutter).coerceAtLeast(1f)
                     val slop = viewConfiguration.touchSlop
                     val velocity = VelocityTracker().apply { addPosition(down.uptimeMillis, down.position) }
                     var panning = false
@@ -324,7 +332,7 @@ internal fun WatchTimeChart(
                         if (pressed.isEmpty()) break
                         if (pressed.size > 1) {
                             zooming = true
-                            val focus = (event.calculateCentroid(useCurrent = true).x / width).coerceIn(0f, 1f)
+                            val focus = ((event.calculateCentroid(useCurrent = true).x - gutter) / width).coerceIn(0f, 1f)
                             window.zoom(event.calculateZoom(), focus)
                             window.pan(-event.calculatePan().x / width * window.span)
                             event.changes.forEach { it.consume() }
@@ -363,7 +371,7 @@ internal fun WatchTimeChart(
                         }
                         !zooming -> {
                             val step = stepFor(window.span, width, MinSlot.toPx())
-                            val at = window.start + down.position.x / width * window.span
+                            val at = window.start + ((down.position.x - gutter) / width).coerceIn(0f, 1f) * window.span
                             tap(step, barStart(floor(at).toLong(), step))
                         }
                     }
@@ -372,15 +380,18 @@ internal fun WatchTimeChart(
     ) {
         val labelBand = LabelBand.toPx()
         val top = TopBand.toPx()
+        val plotLeft = AxisWidth.toPx()
+        val plotWidth = size.width - plotLeft
         val plotBottom = size.height - labelBand
         val plotHeight = plotBottom - top
-        val step = stepFor(window.span, size.width, MinSlot.toPx())
-        val pxPerHour = size.width / window.span.toFloat()
+        val step = stepFor(window.span, plotWidth, MinSlot.toPx())
+        val pxPerHour = plotWidth / window.span.toFloat()
         val slot = pxPerHour * step.hours
         val gap = min(2.dp.toPx(), slot / 3)
-        val barWidth = min(slot - gap, 24.dp.toPx()).coerceAtLeast(1f)
+        // Narrow slots: the whole slot but a gap. Wide ones (a few days): about two thirds, so few bars don't look like blocks.
+        val barWidth = min(slot - gap, max(24.dp.toPx(), slot * 0.62f)).coerceIn(1f, 56.dp.toPx())
         val radius = min(4.dp.toPx(), barWidth / 2)
-        fun x(hour: Double) = ((hour - window.start) * pxPerHour).toFloat()
+        fun x(hour: Double) = plotLeft + ((hour - window.start) * pxPerHour).toFloat()
 
         // The bars in view (and the ones cut off at the edges).
         val bars = ArrayList<Long>()
@@ -392,15 +403,15 @@ internal fun WatchTimeChart(
         val most = bars.maxOfOrNull { series.value(step, it) } ?: 0L
         val scale = scaleTop(most.coerceAtLeast(1))
 
-        // The scale: a hairline at the top, labelled, and one halfway up.
-        listOf(top, top + plotHeight / 2).forEach { y ->
-            drawLine(grid.copy(alpha = 0.5f), Offset(0f, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+        // The scale: hairlines at the top and halfway up, labelled in the gutter on the left, and 0 at the bottom.
+        listOf(top to scale, top + plotHeight / 2 to scale / 2, plotBottom to 0L).forEach { (y, ms) ->
+            if (ms > 0) drawLine(grid.copy(alpha = 0.5f), Offset(plotLeft, y), Offset(size.width, y), strokeWidth = 1.dp.toPx())
+            val label = measurer.measure(formatScale(ms), labelStyle)
+            drawText(label, ink, Offset(plotLeft - label.size.width - 6.dp.toPx(), y - label.size.height / 2))
         }
-        val topLabel = measurer.measure(formatScale(scale), labelStyle)
-        drawText(topLabel, ink, Offset(0f, top - topLabel.size.height - 2.dp.toPx()))
 
         // Rounded at the top only: the round bottom is drawn below the baseline, and cut off.
-        clipRect(0f, 0f, size.width, plotBottom) {
+        clipRect(plotLeft, 0f, size.width, plotBottom) {
             bars.forEach { start ->
                 val value = series.value(step, start)
                 if (value <= 0) return@forEach
@@ -412,32 +423,50 @@ internal fun WatchTimeChart(
                     size = Size(barWidth, h + radius),
                     cornerRadius = CornerRadius(radius),
                 )
+                // Its value above it, when there's room (a few days, or hours zoomed in).
+                if (slot < MinLabelSlot.toPx()) return@forEach
+                val text = measurer.measure(formatWatchTime(value), labelStyle)
+                if (text.size.width <= slot - 4.dp.toPx()) {
+                    val labelLeft = x(start.toDouble()) + (slot - text.size.width) / 2
+                    if (labelLeft >= plotLeft && labelLeft + text.size.width <= size.width) {
+                        drawText(text, ink, Offset(labelLeft, (plotBottom - h - text.size.height - 2.dp.toPx()).coerceAtLeast(0f)))
+                    }
+                }
             }
         }
-        drawLine(grid, Offset(0f, plotBottom), Offset(size.width, plotBottom), strokeWidth = 1.dp.toPx())
+        drawLine(grid, Offset(plotLeft, plotBottom), Offset(size.width, plotBottom), strokeWidth = 1.dp.toPx())
 
         // The labels along the bottom, as many as fit: never cut off at the edges.
         val minGap = LabelGap.toPx() / pxPerHour
         ticks(step, window.start, window.end, minGap.toDouble()).forEach { tick ->
             val text = measurer.measure(tick.text, labelStyle)
             val left = x(tick.at) - text.size.width / 2
-            if (left >= 0 && left + text.size.width <= size.width) {
+            if (left >= plotLeft && left + text.size.width <= size.width) {
                 drawText(text, ink, Offset(left, plotBottom + 4.dp.toPx()))
             }
         }
     }
 }
 
-/** "2 h", "30 min": the top of the scale. */
+/** "2 h", "30 min", "0": a mark on the scale (the scale's round amounts, so its half is round too). */
 private fun formatScale(ms: Long): String {
     val minutes = ms / 60_000
-    return if (minutes < 60) "$minutes min" else "${minutes / 60} h"
+    return when {
+        ms <= 0 -> "0"
+        minutes < 60 -> "$minutes min"
+        minutes % 60 == 0L -> "${minutes / 60} h"
+        else -> "${minutes / 60} h ${minutes % 60}"
+    }
 }
 
-/** The plot, the room above it for the scale's label, and below it for the dates. */
-private val ChartHeight = 180.dp
-private val TopBand = 18.dp
+/** The plot, the room above it for the tallest bar's value, below it for the dates, and on its left for the scale. */
+private val ChartHeight = 200.dp
+private val TopBand = 20.dp
 private val LabelBand = 20.dp
+private val AxisWidth = 44.dp
+
+/** Bars narrower than this have no room for their value above them (the shortest, "5 min", is about this wide). */
+private val MinLabelSlot = 28.dp
 
 /** Labels along the bottom are at least this far apart (centre to centre). */
 private val LabelGap = 56.dp

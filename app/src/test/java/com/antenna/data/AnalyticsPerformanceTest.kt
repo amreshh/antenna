@@ -11,7 +11,7 @@ import org.junit.Test
 /**
  * The Analytics tab is worked out again whenever the history changes, which is every few
  * seconds while a video plays, and once more for each card something is picked in. With the
- * most history the app keeps (1000 videos, each with its title, tags and category), a year of
+ * most history the app keeps (1000 videos, each with its title and category), a year of
  * the watch log, 100 subscriptions and two picks, it has to stay quick. Like the For you
  * timing test, the budget is generous: it's here to catch something going quadratic, not
  * milliseconds.
@@ -24,11 +24,10 @@ class AnalyticsPerformanceTest {
             watched(video(n, channel = "c${n % 60}").copy(title = "Rust and Linux gaming, part $n of topic${n % 50}"), fraction = (n % 10) / 10.0, daysAgo = n / 20.0)
                 .copy(
                     category = "Category ${n % 12}",
-                    tags = (1..WatchHistoryStore.MAX_TAGS).map { "tag${(n + it) % 40}" },
                     skipped = if (n % 3 == 0) listOf(SkippedSegment("sponsor", 60_000, 45_000)) else emptyList(),
                 )
         }
-        val filters = listOf(StatsFilter(Kind.Channel, channelUrl("c1"), "c1"), StatsFilter(Kind.Topic, "rust", "Rust"))
+        val filters = listOf(StatsFilter(Kind.Channel, channelUrl("c1"), "c1"), StatsFilter(Kind.Category, "Category 1", "Category 1"))
         // A year of the watch log for a heavy viewer: about 15 stretches a day.
         val spans = (1..5_500).map { n ->
             WatchSpan(TestData.id(n % 1000 + 1), channelUrl("c${n % 60}"), NOW - n * 1_500_000L, 0, 300_000, OpenSource.entries[n % OpenSource.entries.size])

@@ -8,6 +8,7 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import org.json.JSONObject
@@ -60,8 +61,18 @@ class WatchLogStore private constructor(context: Context) {
     private val _spans = MutableStateFlow<List<WatchSpan>>(emptyList())
     val spans: StateFlow<List<WatchSpan>> = _spans.asStateFlow()
 
+    /** Whether the files have been read: until then [spans] is empty, not "nothing watched". */
+    private val loaded = MutableStateFlow(false)
+
     init {
-        io.launch { load() }
+        io.launch {
+            load()
+            loaded.value = true
+        }
+    }
+
+    suspend fun awaitLoaded() {
+        loaded.first { it }
     }
 
     /** A stretch has ended (shorter than [MIN_SPAN_MS] is left out: a quick seek, a stutter). */
@@ -157,14 +168,19 @@ fun forgetWatched(context: Context, url: String) {
     videoIdOf(url)?.let { id ->
         WatchLogStore.get(context).remove(id)
         Prefetcher.get(context).forget(id)
+        ShownInForYou.get(context).forget(id)
     }
 }
 
-/** Clears the history, and everything else recorded about what was watched. */
+/**
+ * Clears the history, and everything else recorded about what was watched. What you told For
+ * you (Not interested, channels not to recommend) stays: the Analytics tab lists it.
+ */
 fun clearWatched(context: Context) {
     WatchHistoryStore.get(context).clear()
     WatchLogStore.get(context).clear()
     Prefetcher.get(context).clear()
+    ShownInForYou.get(context).clear()
 }
 
 internal fun WatchSpan.toJson(): String = JSONObject()
@@ -193,14 +209,14 @@ internal fun spanFromJson(line: String): WatchSpan? = runCatching {
 
 /** What the stretches of watching say: how you sit down to watch. */
 data class SittingStats(
-    /** Sittings in the last [SITTING_DAYS] days, what they played, and how many videos they had in all. */
+    /** Sittings (from when they're counted), what they played, and how many videos they had in all. */
     val sittings: Int,
     val playedMs: Long,
     val videos: Int,
     /** Days in a row with something watched: the most, and the run up to today (or yesterday). */
     val longestStreak: Int,
     val currentStreak: Int,
-    /** Videos with part of them played more than once, in the last [SITTING_DAYS] days. */
+    /** Videos with part of them played more than once, of those. */
     val rewatched: Int,
     /** The first stretch recorded: these numbers count from then. */
     val since: Long,
@@ -213,11 +229,20 @@ const val SITTING_DAYS = 30
 /** Playing a part again for longer than this makes a video rewatched (not a few seconds back). */
 private const val REWATCH_MS = 30_000L
 
-/** The sittings in [spans] (null without any): stretches less than half an hour apart are one sitting. */
-fun sittingStats(spans: List<WatchSpan>, now: Long, zone: ZoneId = ZoneId.systemDefault()): SittingStats? {
+/**
+ * The sittings in [spans] (null without any): stretches less than half an hour apart are one
+ * sitting. The sittings, what they played and what was played again count from [since] (null:
+ * everything); the days in a row, over everything.
+ */
+fun sittingStats(
+    spans: List<WatchSpan>,
+    now: Long,
+    zone: ZoneId = ZoneId.systemDefault(),
+    since: Long? = now - SITTING_DAYS * DAY_MS,
+): SittingStats? {
     if (spans.isEmpty()) return null
     val sorted = spans.sortedBy { it.startedAt }
-    val recent = sorted.filter { now - it.startedAt in 0..SITTING_DAYS * DAY_MS }
+    val recent = sorted.filter { it.startedAt <= now && (since == null || it.startedAt >= since) }
 
     var sittings = 0
     var videos = 0

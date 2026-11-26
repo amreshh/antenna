@@ -39,7 +39,7 @@ import com.antenna.data.Channel
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun ChannelScreen(vm: ChannelViewModel, channel: Channel, onBack: () -> Unit, onOpenVideo: (String) -> Unit) {
+fun ChannelScreen(vm: ChannelViewModel, channel: Channel, onBack: () -> Unit, onOpenVideo: OpenVideo) {
     LaunchedEffect(channel.url) { vm.open(channel) }
     val state by vm.state.collectAsStateWithLifecycle()
     val subscriptions by vm.subscriptions.collectAsStateWithLifecycle()
@@ -88,7 +88,7 @@ fun ChannelScreen(vm: ChannelViewModel, channel: Channel, onBack: () -> Unit, on
                 }
             }
 
-            videoItems(state.items, wide, onClick = { onOpenVideo(it.url) })
+            videoItems(state.items, wide, onClick = { onOpenVideo(it.url, positionOf(state.items, it)) })
 
             if (state.loading || state.canLoadMore) {
                 fullWidthItem(key = "more") {

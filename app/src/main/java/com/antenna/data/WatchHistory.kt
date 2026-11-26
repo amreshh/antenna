@@ -34,23 +34,27 @@ data class WatchEntry(
     val related: List<VideoItem> = emptyList(),
     /** YouTube's category for it ("Music", "Gaming"…), for the Analytics tab; null if not recorded. */
     val category: String? = null,
-    /** The uploader's tags for it (the first [WatchHistoryStore.MAX_TAGS]), for the Analytics tab's topics. */
-    val tags: List<String> = emptyList(),
     /** What SponsorBlock skipped in it, each segment once ([withSkip]), for the Analytics tab. */
     val skipped: List<SkippedSegment> = emptyList(),
 ) {
     val fraction: Float
         get() = if (durationMs <= 0) 0f else (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
 
-    /**
-     * Same idea as YouTube: counts as watched once you're near the end, meaning 90% in, or
-     * in the last 30 seconds once you're past halfway (the end screens of shorter videos).
-     * Without the halfway check, a video under 30 seconds counted as watched as soon as
-     * it was opened.
-     */
+    /** Counts as watched once you're near the end ([reachedEnd]), like YouTube. */
     val isWatched: Boolean
-        get() = durationMs > 0 &&
-            (fraction >= 0.9f || (fraction >= 0.5f && durationMs - positionMs < 30_000))
+        get() = reachedEnd(positionMs, durationMs)
+}
+
+/**
+ * Whether [positionMs] is the end of a video [durationMs] long. Same idea as YouTube: 90% in,
+ * or in the last 30 seconds once you're past halfway (the end screens of shorter videos).
+ * Without the halfway check, a video under 30 seconds counted as watched as soon as it was
+ * opened.
+ */
+fun reachedEnd(positionMs: Long, durationMs: Long): Boolean {
+    if (durationMs <= 0) return false
+    val fraction = (positionMs.toFloat() / durationMs).coerceIn(0f, 1f)
+    return fraction >= 0.9f || (fraction >= 0.5f && durationMs - positionMs < 30_000)
 }
 
 /** A SponsorBlock segment the player skipped in a video. */
@@ -127,8 +131,8 @@ class WatchHistoryStore private constructor(context: Context) {
     fun entryFor(url: String): WatchEntry? = videoIdOf(url)?.let { _entries.value[it] }
 
     /**
-     * Saves the playback position. [related], [category] and [tags] are known when a video
-     * opens; null keeps what was stored earlier.
+     * Saves the playback position. [related] and [category] are known when a video opens;
+     * null keeps what was stored earlier.
      */
     fun record(
         video: VideoItem,
@@ -136,7 +140,6 @@ class WatchHistoryStore private constructor(context: Context) {
         durationMs: Long,
         related: List<VideoItem>? = null,
         category: String? = null,
-        tags: List<String>? = null,
     ) {
         val id = videoIdOf(video.url) ?: return
         var added = false
@@ -150,7 +153,6 @@ class WatchHistoryStore private constructor(context: Context) {
                 lastWatchedAt = System.currentTimeMillis(),
                 related = related ?: old?.related.orEmpty(),
                 category = category?.takeIf { it.isNotBlank() } ?: old?.category,
-                tags = tags?.take(MAX_TAGS) ?: old?.tags.orEmpty(),
                 skipped = old?.skipped.orEmpty(),
             )
             val updated = map + (id to entry)
@@ -293,7 +295,6 @@ class WatchHistoryStore private constructor(context: Context) {
     companion object {
         private const val TAG = "History"
         private const val MAX_ENTRIES = 1000
-        const val MAX_TAGS = 15
         private const val MAX_WITH_RELATED = 150
         private const val SAVE_DELAY_MS = 30_000L
 
@@ -324,7 +325,6 @@ internal fun encodeHistory(entries: Map<String, WatchEntry>): String {
                 .put("dur", e.durationMs)
                 .put("at", e.lastWatchedAt)
                 .put("cat", e.category ?: JSONObject.NULL)
-                .put("tags", JSONArray(e.tags))
                 .apply { if (e.skipped.isNotEmpty()) put("skips", skipsToJson(e.skipped)) },
         )
     }
@@ -371,7 +371,6 @@ internal fun decodeHistory(history: String, related: String?): DecodedHistory {
             val inline = o.optJSONArray("related")
             if (inline != null && inline.length() > 0) relatedInline = true
             val rel = inline?.takeIf { it.length() > 0 } ?: lists?.optJSONArray(id) ?: JSONArray()
-            val tags = o.optJSONArray("tags") ?: JSONArray()
             entries[id] = WatchEntry(
                 video = video,
                 positionMs = o.optLong("pos"),
@@ -379,7 +378,6 @@ internal fun decodeHistory(history: String, related: String?): DecodedHistory {
                 lastWatchedAt = o.optLong("at"),
                 related = (0 until rel.length()).mapNotNull { j -> runCatching { videoFromJson(rel.getJSONObject(j)) }.getOrNull() },
                 category = o.optString("cat").takeIf { it.isNotEmpty() && !o.isNull("cat") },
-                tags = (0 until tags.length()).map { tags.getString(it) },
                 skipped = skipsFromJson(o.optJSONArray("skips")),
             )
         } catch (_: Exception) {

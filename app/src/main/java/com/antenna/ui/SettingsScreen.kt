@@ -109,9 +109,10 @@ fun SettingsScreen(onBack: () -> Unit) {
             item {
                 SettingRow(
                     "Get likely videos ready",
-                    detail = "When the app opens, it fetches the details of up to 3 videos you're likely to " +
-                        "watch, so they start sooner: a few small requests, never any video. It fetches " +
-                        "fewer, or none, when its guesses aren't opened. Analytics shows how it's doing.",
+                    detail = "When you're about to pick a video (the app opening, a video ending, a channel " +
+                        "picked, For you loading), it fetches the details of the likeliest, so they start " +
+                        "sooner: a few small requests, never any video. It fetches fewer, or none, where its " +
+                        "guesses aren't opened. Analytics shows how it's doing.",
                     onClick = {
                         prefetch = !prefetch
                         prefs.prefetch = prefetch

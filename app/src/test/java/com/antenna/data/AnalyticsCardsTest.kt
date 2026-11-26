@@ -36,14 +36,16 @@ class AnalyticsCardsTest {
             watched(video(1, channel = "subscribed"), fraction = 1.0),
             watched(video(2, channel = "other"), fraction = 0.5),
             watched(video(3, channel = "favourite"), fraction = 1.0),
+            watched(video(4, channel = "favourite"), fraction = 0.5),
         )
         val subscriptions = listOf(subscription("subscribed"))
         val s = analyticsOf(history, subscriptions = subscriptions).shown
         assertEquals(Share(600_000, 1), s.subscribed)
-        assertEquals(Share(900_000, 2), s.notSubscribed)
-        assertEquals(listOf("favourite", "other"), s.unsubscribedChannels.map { it.name })
+        assertEquals(Share(1_200_000, 3), s.notSubscribed)
+        // Suggested to subscribe to: only a channel you came back to (one video isn't enough).
+        assertEquals(listOf("favourite"), s.unsubscribedChannels.map { it.name })
         val others = analyticsOf(history, listOf(StatsFilter(Kind.Subscribed, StatsFilter.NOT_SUBSCRIBED, "Other channels")), subscriptions)
-        assertEquals(2, others.shown.videos)
+        assertEquals(3, others.shown.videos)
     }
 
     @Test
@@ -112,7 +114,7 @@ class AnalyticsCardsTest {
     }
 
     @Test
-    fun `the last 7 days, and the 7 before`() {
+    fun `a range covers its last days, today among them, and compares with as many days before`() {
         val history = listOf(
             watched(video(1), fraction = 1.0, daysAgo = 0.0),
             watched(video(2), fraction = 0.5, daysAgo = 6.0),
@@ -120,9 +122,29 @@ class AnalyticsCardsTest {
             watched(video(4), fraction = 1.0, daysAgo = 13.0),
             watched(video(5), fraction = 1.0, daysAgo = 20.0), // neither
         )
-        val s = analyticsOf(history).shown
-        assertEquals(Share(900_000, 2), s.thisWeek)
-        assertEquals(Share(1_200_000, 2), s.lastWeek)
+        val week = analytics(history, emptyList(), NOW, utc, range = StatsRange.Week)
+        assertEquals(Share(900_000, 2), Share(week.shown.watchedMs, week.shown.videos))
+        assertEquals(Share(1_200_000, 2), week.previous)
+        assertEquals(NOW - 6 * DAY_MS, week.firstWatched)
+        // All time: everything, and nothing to compare with.
+        val all = analytics(history, emptyList(), NOW, utc, range = StatsRange.All)
+        assertEquals(5, all.shown.videos)
+        assertNull(all.previous)
+    }
+
+    @Test
+    fun `no comparison when the history doesn't go back before the range`() {
+        val history = listOf(watched(video(1), daysAgo = 1.0), watched(video(2), daysAgo = 3.0))
+        assertNull(analytics(history, emptyList(), NOW, utc, range = StatsRange.Week).previous)
+    }
+
+    @Test
+    fun `sittings count in the range, the days in a row over everything`() {
+        val hour = 60 * 60 * 1000L
+        val spans = (0..9).map { d -> WatchSpan(id(1), "c", NOW - d * DAY_MS - hour, 0, 600_000, null) } // every day for 10 days
+        val week = analytics(listOf(watched(video(1))), emptyList(), NOW, utc, spans = spans, range = StatsRange.Week).sittings!!
+        assertEquals(7, week.sittings)
+        assertEquals(10, week.currentStreak)
     }
 
     @Test

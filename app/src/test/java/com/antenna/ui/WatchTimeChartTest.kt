@@ -17,8 +17,9 @@ class WatchTimeChartTest {
     fun `bars are hours while they're wide enough, then days, then weeks`() {
         // 600 px wide, bars at least 5 px.
         assertEquals(Step.Hour, stepFor(spanHours = 24.0, widthPx = 600f, minSlotPx = 5f)) // 25 px an hour
-        assertEquals(Step.Hour, stepFor(spanHours = 120.0, widthPx = 600f, minSlotPx = 5f)) // 5 px an hour
-        assertEquals(Step.Day, stepFor(spanHours = 121.0, widthPx = 600f, minSlotPx = 5f))
+        assertEquals(Step.Hour, stepFor(spanHours = 72.0, widthPx = 600f, minSlotPx = 5f)) // 3 days, 8 px an hour
+        assertEquals(Step.Day, stepFor(spanHours = 73.0, widthPx = 6000f, minSlotPx = 5f)) // over 3 days: days, however wide
+        assertEquals(Step.Day, stepFor(spanHours = 48.0, widthPx = 200f, minSlotPx = 5f)) // hours too narrow
         assertEquals(Step.Day, stepFor(spanHours = 30 * 24.0, widthPx = 600f, minSlotPx = 5f))
         assertEquals(Step.Week, stepFor(spanHours = 365 * 24.0, widthPx = 600f, minSlotPx = 5f))
     }
@@ -71,7 +72,7 @@ class WatchTimeChartTest {
         assertEquals(hourIndex(day, 6) + 0.5, hours[1].at, 1e-9) // under the middle of its bar
 
         val days = ticks(Step.Day, start = day * 24.0, end = (day + 3) * 24.0, minGap = 24.0)
-        assertEquals(listOf("Nov 24", "Nov 25", "Nov 26"), days.map { it.text })
+        assertEquals(listOf("Tue 24", "Wed 25", "Thu 26"), days.map { it.text }) // every day: with its weekday
 
         // Too narrow for every day: Mondays.
         val mondays = ticks(Step.Day, start = day * 24.0, end = (day + 14) * 24.0, minGap = 3 * 24.0)
@@ -110,13 +111,14 @@ class WatchTimeChartTest {
     }
 
     @Test
-    fun `it's at the default when it shows the last 30 days`() {
+    fun `it knows when it shows the last days, as it does at first`() {
         val last = (day + 1) * 24.0
-        val w = TimeWindow(last - DEFAULT_SPAN_HOURS, DEFAULT_SPAN_HOURS)
+        val span = 30 * 24.0
+        val w = TimeWindow(last - span, span)
         w.setBounds(first = last - 400 * 24.0, last = last)
-        assertTrue(w.isDefault)
+        assertTrue(w.showsLast(span))
         w.pan(-24.0)
-        assertFalse(w.isDefault)
+        assertFalse(w.showsLast(span))
     }
 
     @Test

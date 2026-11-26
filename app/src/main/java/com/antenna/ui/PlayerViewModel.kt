@@ -73,6 +73,9 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         /** Resume only if you got past this point and aren't basically finished. */
         const val RESUME_MIN_MS = 10_000L
 
+        /** A long video's end, for guessing what's next: its last 10 minutes at most. */
+        const val ENDING_MS = 10 * 60_000L
+
         // Kept when Android ends the app in the background, so it comes back on the same video.
         const val STATE_URL = "player_url"
         const val STATE_BACK_STACK = "player_back_stack"
@@ -174,6 +177,10 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     // current video
     private var currentVideo: VideoItem? = null
     private var currentInfo: StreamInfo? = null
+
+    /** The open video's Up next list, and whether Prefetcher has heard it's near its end (once a video). */
+    private var upNext: List<VideoItem> = emptyList()
+    private var endingGuessed = false
     private var segments: List<Segment> = emptyList()
     private val allowed = mutableSetOf<String>()       // segments the user chose to watch
     private val reported = mutableSetOf<String>()      // skips already reported to SponsorBlock
@@ -278,34 +285,38 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
 
     // --- Opening and closing ---------------------------------------------------------
 
-    /** A video tapped in a list ([source]): it replaces whatever is playing, and Back minimizes it. */
-    fun open(url: String, source: OpenSource) {
+    /**
+     * A video tapped in a list ([source], at [position] in it): it replaces whatever is
+     * playing, and Back minimizes it.
+     */
+    fun open(url: String, source: OpenSource, position: Int = -1) {
         if (url.sameVideoAs(currentUrl)) {
             expand()
             return
         }
         backStack.clear()
-        opened(url, source)
+        opened(url, source, position)
         show(url, addToBackStack = false)
         expand()
     }
 
     /**
-     * A video in Up next, a link from another app, or another video linked in the description
-     * ([source]): the video that's playing goes on the back stack, so Back returns to it.
+     * A video in Up next (at [position] in it), a link from another app, or another video
+     * linked in the description ([source]): the video that's playing goes on the back stack,
+     * so Back returns to it.
      */
-    fun openLink(url: String, source: OpenSource) {
+    fun openLink(url: String, source: OpenSource, position: Int = -1) {
         if (!url.sameVideoAs(currentUrl)) {
-            opened(url, source)
+            opened(url, source, position)
             show(url, addToBackStack = true)
         }
         expand()
     }
 
-    /** You opened [url] from [source] (not Back to it): for the watch log, and the app's guesses. */
-    private fun opened(url: String, source: OpenSource) {
+    /** You opened [url] from [source], at [position] in its list (not Back to it): for the watch log, and the app's guesses. */
+    private fun opened(url: String, source: OpenSource, position: Int) {
         videoIdOf(url)?.let { sources[it] = source }
-        prefetcher.onVideoOpened(url) // was it one the app guessed you'd open?
+        prefetcher.onVideoOpened(url, source, position) // was it one the app guessed you'd open, and how far down its list?
     }
 
     /** A stretch of watching starts, at [at] in the video. */
@@ -513,6 +524,8 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         currentUrl = url
         currentVideo = null
         currentInfo = null
+        upNext = emptyList()
+        endingGuessed = false
         qualities = emptyList()
         chosenQuality = null // each video starts on Auto
         refreshJob?.cancel()
@@ -546,6 +559,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                 val video = info.toVideoItem()
                 val related = info.relatedItems.filterIsInstance<StreamInfoItem>().map { it.toVideoItem() }
                 currentVideo = video
+                upNext = related
 
                 // Resume where you left off, unless you'd basically finished it.
                 history.awaitLoaded()
@@ -571,7 +585,6 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                     durationMs = previous?.durationMs?.takeIf { it > 0 } ?: (info.duration * 1000),
                     related = related,
                     category = info.category,
-                    tags = info.tags.orEmpty(),
                 )
 
                 val ready = PlayerUiState.Ready(
@@ -648,11 +661,27 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         launch {
             while (true) {
                 delay(5_000)
-                if (isPlaying) saveProgress()
+                if (isPlaying) {
+                    saveProgress()
+                    guessWhatsNext()
+                }
                 // The stretch so far, kept in case the app is closed before it ends.
                 span?.let { s -> exoPlayer?.let { watchLog.checkpoint(s.copy(toMs = it.currentPosition)) } }
             }
         }
+    }
+
+    /**
+     * Near the end of the video (its last fifth, or its last 10 minutes if that's less), you're
+     * about to pick what's next, likely from its Up next list: Prefetcher guesses, once a video.
+     */
+    private fun guessWhatsNext() {
+        val player = exoPlayer ?: return
+        val duration = player.duration
+        if (endingGuessed || upNext.isEmpty() || duration == C.TIME_UNSET || duration <= 0) return
+        if (duration - player.currentPosition > minOf(duration / 5, ENDING_MS)) return
+        endingGuessed = true
+        prefetcher.onVideoEnding(upNext)
     }
 
     /** Checks the playhead a few times a second and jumps over sponsor segments. */

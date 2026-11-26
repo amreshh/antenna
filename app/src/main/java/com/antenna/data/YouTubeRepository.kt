@@ -2,7 +2,6 @@ package com.antenna.data
 
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
 import org.schabi.newpipe.extractor.channel.ChannelInfoItem
-import android.text.format.DateUtils
 import android.util.Log
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -236,6 +235,7 @@ fun StreamInfo.toVideoItem(): VideoItem = VideoItem(
     uploadedAtMs = runCatching { uploadDate?.instant?.toEpochMilli() }.getOrNull() ?: 0L,
     uploadedText = textualUploadDate,
     channelUrl = normalizeChannelUrl(uploaderUrl.orEmpty()),
+    channelAvatarUrl = uploaderAvatars.pick(CHANNEL_AVATAR_HEIGHT),
 )
 
 /**
@@ -261,10 +261,30 @@ fun formatDuration(totalSeconds: Long): String {
     return if (h > 0) "%d:%02d:%02d".format(h, m, s) else "%d:%02d".format(m, s)
 }
 
-/** "3 hours ago" style label for a video. */
+/** "3 hours ago", "2 weeks ago", "17 years ago": when a video came out, the way YouTube says it ([timeAgo]). */
 fun VideoItem.ageLabel(now: Long = System.currentTimeMillis()): String = when {
-    uploadedAtMs > 0 -> DateUtils.getRelativeTimeSpanString(
-        uploadedAtMs, now, DateUtils.MINUTE_IN_MILLIS,
-    ).toString()
+    uploadedAtMs > 0 -> timeAgo(now - uploadedAtMs)
     else -> uploadedText.orEmpty()
+}
+
+/**
+ * How long ago something was, in its largest whole unit, the way YouTube writes it. Not a
+ * date: most lists (Up next, search) only say "17 years ago", and the date worked out from
+ * that ("Nov 23, 2009": the day it was fetched, 17 years back) would be made up.
+ */
+internal fun timeAgo(ms: Long): String {
+    if (ms < 0) return "upcoming" // a premiere, or a stream not started yet
+    val minutes = ms / 60_000
+    val hours = minutes / 60
+    val days = hours / 24
+    fun ago(n: Long, unit: String) = "$n $unit${if (n == 1L) "" else "s"} ago"
+    return when {
+        minutes < 1 -> "just now"
+        hours < 1 -> ago(minutes, "minute")
+        days < 1 -> ago(hours, "hour")
+        days < 7 -> ago(days, "day")
+        days < 30 -> ago(days / 7, "week")
+        days < 365 -> ago(days / 30, "month")
+        else -> ago(days / 365, "year")
+    }
 }

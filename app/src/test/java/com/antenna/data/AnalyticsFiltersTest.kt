@@ -108,11 +108,11 @@ class AnalyticsFiltersTest {
         // A card with nothing picked: the videos that match everything.
         assertEquals(1, a.forCard(Kind.Hour).videos)
         assertEquals(channel("a"), a.picked(Kind.Channel))
-        assertNull(a.picked(Kind.Topic))
+        assertNull(a.picked(Kind.Category))
     }
 
     @Test
-    fun `days, hours, topics, categories and kinds of skip pick their videos`() {
+    fun `days, hours, categories and kinds of skip pick their videos`() {
         val now = Instant.ofEpochMilli(NOW).atZone(utc)
         val first = watched(video(1).copy(title = "Rust compiler"), daysAgo = 0.0)
             .copy(category = "Science & Technology")
@@ -124,7 +124,6 @@ class AnalyticsFiltersTest {
         val today = if (now.hour >= 1) 2 else 1 // the video an hour earlier is today too, unless it's past midnight
         assertEquals(today, count(StatsFilter(Kind.Day, now.toLocalDate().toEpochDay().toString(), "today")))
         assertEquals(2, count(StatsFilter(Kind.Hour, now.hour.toString(), "this hour"))) // and the day before, at the same time
-        assertEquals(2, count(StatsFilter(Kind.Topic, "rust", "Rust")))
         assertEquals(1, count(StatsFilter(Kind.Category, "Gaming", "Gaming")))
         assertEquals(1, count(StatsFilter(Kind.Skipped, "sponsor", "Sponsors")))
         assertEquals(0, count(StatsFilter(Kind.Skipped, "intro", "Intros")))
@@ -154,25 +153,12 @@ class AnalyticsFiltersTest {
     }
 
     @Test
-    fun `a picked channel is listed even when it isn't among the top ones`() {
+    fun `every channel is listed, the most watched first (the card shows the top ones, See all the rest)`() {
         val many = (1..10).map { watched(video(it, channel = "c$it"), fraction = 1.0) }
         val small = watched(video(11, channel = "small"), fraction = 0.1)
-        val picked = analytics(many + small, listOf(channel("small")), NOW, utc).forCard(Kind.Channel).topChannels
-        assertEquals(WatchStats.TOP_CHANNELS + 1, picked.size)
-        assertEquals("small", picked.last().name)
-        // Not picked, it's left out.
-        assertTrue(analytics(many + small, emptyList(), NOW, utc).shown.topChannels.none { it.name == "small" })
-    }
-
-    @Test
-    fun `a picked topic is listed even when it comes up in one video`() {
-        val a = analyticsOf(
-            watched(video(1).copy(title = "Linux kernel")),
-            watched(video(2).copy(title = "Linux desktop")),
-            filters = listOf(StatsFilter(Kind.Topic, "kernel", "kernel")),
-        )
-        assertEquals(setOf("linux", "kernel"), a.forCard(Kind.Topic).topics.map { it.key }.toSet())
-        assertEquals(listOf("linux"), a.all.topics.map { it.key }) // two videos needed otherwise
+        val channels = analytics(many + small, emptyList(), NOW, utc).shown.topChannels
+        assertEquals(11, channels.size)
+        assertEquals("small", channels.last().name)
     }
 
     @Test
@@ -188,7 +174,7 @@ class AnalyticsFiltersTest {
 
     @Test
     fun `picks are kept as text and read back`() {
-        val filters = listOf(channel("a"), StatsFilter(Kind.Hour, "22", "22:00–23:00"), StatsFilter(Kind.Topic, "c++", "C++"))
+        val filters = listOf(channel("a"), StatsFilter(Kind.Hour, "22", "22:00–23:00"), StatsFilter(Kind.Category, "Science & Technology", "Science & Technology"))
         assertEquals(filters, StatsFilter.restore(StatsFilter.save(filters)))
         // Something unknown, or cut short, is left out.
         assertEquals(emptyList<StatsFilter>(), StatsFilter.restore(listOf("NoSuchKind", "x", "y", "Hour")))

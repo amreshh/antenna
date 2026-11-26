@@ -18,7 +18,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.graphics.vector.addPathNodes
 import com.antenna.data.WatchLaterStore
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -123,7 +125,8 @@ internal fun LazyGridScope.fullWidthItem(key: Any? = null, content: @Composable 
 /**
  * With [onChannelClick], each video shows its channel's avatar (when its channel is known),
  * and tapping the avatar opens the channel. Without a [trailing] of its own, each video gets
- * the ⋮ menu ([VideoMenu]). [onShown] hears of each video as it comes on screen.
+ * the ⋮ menu ([VideoMenu]), with [moreOptions] at its end. [onShown] hears of each video as it
+ * comes on screen.
  */
 internal fun LazyGridScope.videoItems(
     items: List<VideoItem>,
@@ -132,18 +135,31 @@ internal fun LazyGridScope.videoItems(
     trailing: (@Composable (VideoItem) -> Unit)? = null,
     onChannelClick: ((Channel) -> Unit)? = null,
     onShown: ((VideoItem) -> Unit)? = null,
+    moreOptions: MenuOptions? = null,
 ) = items(items, key = { it.url }) { item ->
     if (onShown != null) LaunchedEffect(item.url) { onShown(item) }
-    val tail: @Composable () -> Unit = trailing?.let { t -> { t(item) } } ?: { VideoMenu(item) }
+    val tail: @Composable () -> Unit = trailing?.let { t -> { t(item) } } ?: { VideoMenu(item, moreOptions) }
     val channel = item.channelUrl?.let { url -> Channel(url, item.uploader, item.channelAvatarUrl) }
     val openChannel: (() -> Unit)? = onChannelClick?.let { open -> channel?.let { c -> { open(c) } } }
     if (wide) VideoCard(item, onClick = { onClick(item) }, trailing = tail, onChannelClick = openChannel)
     else VideoRow(item, onClick = { onClick(item) }, trailing = tail, onChannelClick = openChannel)
 }
 
-/** ⋮ on a video: save it to Watch later, or take it off. */
+/**
+ * Opens the video at [url], tapped at [position] in its list (0 at the top; -1 when it isn't
+ * known): Prefetcher learns how far down each list you tap.
+ */
+internal typealias OpenVideo = (url: String, position: Int) -> Unit
+
+/** Where [item] is in [items] when it's tapped (-1 if it's gone meanwhile): for [OpenVideo]. */
+internal fun positionOf(items: List<VideoItem>, item: VideoItem): Int = items.indexOfFirst { it.url == item.url }
+
+/** A list's own items at the end of a video's ⋮ menu: given the video, and what closes the menu. */
+internal typealias MenuOptions = @Composable (item: VideoItem, close: () -> Unit) -> Unit
+
+/** ⋮ on a video: save it to Watch later, or take it off; then the list's [moreOptions]. */
 @Composable
-internal fun VideoMenu(item: VideoItem) {
+internal fun VideoMenu(item: VideoItem, moreOptions: MenuOptions? = null) {
     val context = LocalContext.current
     val watchLater = remember(context) { WatchLaterStore.get(context) }
     var open by remember { mutableStateOf(false) }
@@ -162,8 +178,34 @@ internal fun VideoMenu(item: VideoItem) {
                     Toast.makeText(context, if (now) "Saved to Watch later" else "Removed from Watch later", Toast.LENGTH_SHORT).show()
                 },
             )
+            moreOptions?.invoke(item) { open = false }
         }
     }
+}
+
+/** A 24 dp icon from an SVG path, like Material's. */
+private fun svgIcon(name: String, path: String): ImageVector =
+    ImageVector.Builder(name, 24.dp, 24.dp, 24f, 24f)
+        .addPath(addPathNodes(path), fill = SolidColor(Color.Black))
+        .build()
+
+/** Material's "block": YouTube's Not interested. */
+internal val NotInterestedIcon: ImageVector by lazy {
+    svgIcon(
+        "NotInterested",
+        "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zM4 12c0-4.42 3.58-8 8-8 " +
+            "1.85 0 3.55.63 4.9 1.69L5.69 16.9C4.63 15.55 4 13.85 4 12zm8 8c-1.85 0-3.55-.63-4.9-1.69L18.31 " +
+            "7.1C19.37 8.45 20 10.15 20 12c0 4.42-3.58 8-8 8z",
+    )
+}
+
+/** Material's "remove circle outline": YouTube's Don't recommend channel. */
+internal val DontRecommendIcon: ImageVector by lazy {
+    svgIcon(
+        "DontRecommend",
+        "M7 11v2h10v-2H7zm5-9C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm0 18c-4.41 " +
+            "0-8-3.59-8-8s3.59-8 8-8 8 3.59 8 8-3.59 8-8 8z",
+    )
 }
 
 /** Material's "bookmark" icons (the core icon set doesn't have them): saved, and not. */

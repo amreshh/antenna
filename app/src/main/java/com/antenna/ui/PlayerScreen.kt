@@ -250,7 +250,9 @@ internal fun PlayerSheet(
                 color = MaterialTheme.colorScheme.primary,
                 modifier = Modifier.padding(start = 16.dp, top = 16.dp, bottom = 4.dp),
             )
-            related.forEach { item -> VideoRow(item, onClick = { vm.openLink(item.url, OpenSource.UpNext) }, trailing = { VideoMenu(item) }) }
+            related.forEachIndexed { i, item ->
+                VideoRow(item, onClick = { vm.openLink(item.url, OpenSource.UpNext, position = i) }, trailing = { VideoMenu(item) })
+            }
         }
     }
 
