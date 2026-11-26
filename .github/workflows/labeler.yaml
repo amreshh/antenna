@@ -17,6 +17,7 @@ jobs:
   label:
     if: ${{ !github.event.pull_request.head.repo.fork }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions:
       contents: read # the configuration, read through the API
       pull-requests: write # add the labels

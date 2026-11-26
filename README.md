@@ -54,7 +54,9 @@
 - **Sponsor skipping:** segment times come from [SponsorBlock](https://sponsor.ajay.app).
   The lookup uses the privacy-preserving hash-prefix endpoint, so SponsorBlock never learns
   exactly which video you're watching. Choose which categories to skip in Settings, and tap a
-  segment in the list to watch it instead. The segments show on the seek bar, in green. Counting
+  segment in the list to watch it instead. The segments show on the seek bar, in green. If
+  SponsorBlock can't be reached, the app tries again for about two minutes; if it still can't,
+  the list says so (rather than that there's nothing to skip), with Try again. Counting
   your skips in SponsorBlock's public stats is opt-in (Settings), because that report does name
   the video.
 - **The player:** title, channel with a Subscribe button, and the description (views, date,
@@ -72,16 +74,18 @@
 - **The controls, like YouTube's:** no dark bar along the bottom of the video, but the time in a
   pill on the left, and ⚙ and fullscreen in one on the right, under the seek bar. **⚙** opens
   **Quality**, where Auto plays the best quality up to the max set in Settings and shows which
-  one is playing, or pick any quality the video has, for that video (it carries on from the same
-  spot); and **Playback speed**, from 0.25× to 2×, which stays for the next videos.
+  one is playing, or pick any of the video's qualities the device can play, for that video (it
+  carries on from the same spot); and **Playback speed**, from 0.25× to 2×, which stays for the next videos.
 - **Resume where you left off.**
 - **Keeps playing through YouTube's hiccups:** a video server that's briefly busy (HTTP 503) or
   a dropped connection is retried for about 20 seconds; a refused or expired link (YouTube's
   expire after some hours) gets fresh ones and carries on from the same spot. If it still
   can't play, the error says why, with Try again.
 - **Light on data:** on mobile data the app plays at most 480p (Settings → Max video quality on
-  mobile data). Of a quality's files (AV1, VP9, H.264) it plays the smallest the phone decodes
-  in hardware: YouTube says how big each is, and the newer codecs aren't always smaller. It
+  mobile data). Of a quality's files (AV1, VP9, H.264) it plays the smallest that a hardware
+  decoder on the phone says it can play at that size and frame rate (one that tops out at 1080p
+  doesn't count for 2160p): YouTube says how big each is, and the newer codecs aren't always
+  smaller. It
   buffers 15–30 seconds ahead rather than 50, so less is wasted when you leave a video early,
   and starts playing once 1 second is buffered. Back through Up next reuses the details it
   already has. The Subscriptions feed isn't loaded again within 15 minutes, and a channel whose
@@ -290,7 +294,9 @@ everything, and merging it releases exactly what it built and tested
     details and links, then buffering; no budget, as that depends on YouTube's servers).
 
   One comment on the pull request sums it all up and is updated on every run: each check's
-  result and its table, the version merging releases, and a link to download the APK.
+  result and its table, the version merging releases, and a link to download the APK. A
+  pull request that changes only Markdown files and `docs/` gets the workflow checks alone,
+  since merging it releases nothing.
 - **Merging into `main`** releases that APK: no checks run again and nothing is rebuilt. It
   gets signed with the release key (the only thing that changes), tagged `vX.Y.Z`, and
   published as a GitHub Release with its SHA-256 and release notes that group the commits by
@@ -341,7 +347,11 @@ everything, and merging it releases exactly what it built and tested
    (CodeQL: the code, and the workflows), and require branches to be up to date before
    merging. Then nothing unchecked can be merged, and every merge releases exactly the APK
    its pull request tested.
-6. **After merging `dev` into `main`** with a squash merge, reset `dev` to `main`
+6. **Settings → General → Releases:** turn on *Enable release immutability*, so a published
+   release's tag and APK can't be changed afterwards (GitHub also attests it:
+   `gh release verify vX.Y.Z`). The release job attaches the APK as it publishes, which
+   this allows.
+7. **After merging `dev` into `main`** with a squash merge, reset `dev` to `main`
    (`git switch dev && git reset --hard origin/main && git push --force-with-lease`), so the
    next pull request only shows new changes.
 

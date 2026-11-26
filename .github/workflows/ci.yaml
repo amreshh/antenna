@@ -10,6 +10,8 @@ name: ci
 #                  checked, then started on an emulator (smoke test, with cold
 #                  start and memory budgets). A comment on the pull request sums
 #                  it up: each check, their tables, and a link to download the APK.
+#                  A pull request that changes only the docs gets the workflow
+#                  checks alone: merging it releases nothing.
 #   push to main   the release, with no checks and no build: the APK the merged
 #                  pull request built and tested, signed with the release key, a
 #                  git tag v1.2.3 and a GitHub Release with generated notes. The
@@ -24,16 +26,22 @@ name: ci
 #
 #   plan ─┬─ test ─────────┐
 #         ├─ lint ─────────┤
-#         ├─ workflows ────┤
-#         ├─ deps ─────────┼─ checks ─┬─ report (pull requests)
-#         └─ build ─ smoke ┘          └─ sign ─ release (main, tags)
+#         ├─ deps ─────────┤
+#         ├─ build ─ smoke ┼─ checks ─┬─ report (pull requests)
+#         └─ cache (main)  │          └─ sign ─ release (main, tags)
+#   workflows ─────────────┘
+#
+# smoke also waits for test, lint, deps and workflows, and doesn't start when
+# one failed: nothing that failed can be merged, and the emulator is the slowest
+# part. (They finish before build does, so it starts no later.)
 #
 # Version: merging into main bumps the patch of the latest vX.Y.Z tag; "#minor"
 # or "#major" in the pull request's title or in a commit message bumps that
 # instead. The pull request works it out and builds it into the APK, and its
-# comment says which version merging releases. (With no tags yet, the first
-# release is versionName in app/build.gradle.kts.) Changes to nothing but the
-# docs (Markdown files and docs/) release nothing.
+# comment says which version merging releases; when main builds the APK
+# itself, it reads the merged pull request's title too. (With no tags yet, the
+# first release is versionName in app/build.gradle.kts.) Changes to nothing but
+# the docs (Markdown files and docs/) release nothing.
 #
 # Which APK main releases: every file but the docs is fingerprinted, and a pull
 # request keeps its APK as the apk-<fingerprint> artifact. main takes it from
@@ -51,8 +59,10 @@ name: ci
 #   ANDROID_KEY_PASSWORD
 # A release without them fails rather than ship an APK signed with a throwaway key.
 #
-# Caches: only runs on main save the Gradle cache (CodeQL's do); pull requests
-# only restore it, so nothing a pull request does reaches it.
+# Caches: only the cache job saves Gradle's cache, on main after a merge. It runs
+# everything pull requests run, so its entry has all they need; every other job
+# (here, CodeQL's and the weekly dependency scan) only restores it, so nothing a
+# pull request does reaches it.
 on:
   push:
     # main only: a merged pull request, to release. Pushes to dev are work in
@@ -82,12 +92,14 @@ jobs:
   # merged pull request tested.
   plan:
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       actions: read # main: the merged pull request's run and its APK
       pull-requests: read # main: which pull request was merged
     outputs:
       code: ${{ steps.code.outputs.code }}
+      code-changed: ${{ steps.code.outputs.changed }}
       version: ${{ steps.tested.outputs.version || steps.version.outputs.version }}
       previous: ${{ steps.version.outputs.previous }}
       release: ${{ steps.version.outputs.release }}
@@ -101,17 +113,30 @@ jobs:
           fetch-depth: 0 # the release tags, and the pull request's commits
           persist-credentials: false
 
+      # A pull request that changes only the docs skips the jobs that build and
+      # check the app (tests, lint, the dependency scan, the APK and its smoke
+      # test): there's nothing new for them to check, and merging it releases
+      # nothing. checks counts a skipped job as passed.
       - name: Fingerprint the code
         id: code
         run: |
           read -ra docs <<< "$DOCS"
           code=$(git ls-files -s -- . "${docs[@]}" | sha256sum | cut -c1-20)
           echo "Code fingerprint: $code"
-          echo "code=$code" >> "$GITHUB_OUTPUT"
+          changed=true
+          if [ "$GITHUB_EVENT_NAME" = pull_request ] && git diff --quiet HEAD^1 HEAD -- . "${docs[@]}"; then
+            echo "Only the docs change: no tests, lint, dependency scan or APK"
+            changed=false
+          fi
+          {
+            echo "code=$code"
+            echo "changed=$changed"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Work out the version
         id: version
         env:
+          GH_TOKEN: ${{ github.token }}
           PR_TITLE: ${{ github.event.pull_request.title }}
         run: |
           stable='^v[0-9]+\.[0-9]+\.[0-9]+$'
@@ -141,6 +166,12 @@ jobs:
               version=$(next "$(printf '%s\n' "$PR_TITLE"; git log --format=%B HEAD^1..HEAD^2)")
               ;;
             push:refs/tags/v*)
+              # Releases come from main only. Checked here, before any other job
+              # starts, rather than in build.
+              if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+                echo "::error::Tag ${GITHUB_REF_NAME} points at a commit that is not on main"
+                exit 1
+              fi
               version=${GITHUB_REF_NAME#v}
               # The notes start at the stable release before this one.
               last=$(git tag -l 'v*' --sort=-v:refname | grep -E "$stable" | grep -vxF "$GITHUB_REF_NAME" |
@@ -156,7 +187,16 @@ jobs:
               else
                 release=true
               fi
-              version=$(next "$(git log --format=%B "${last:+$last..}HEAD")")
+              # The merged pull request's title as well as the commit messages, as
+              # its own run had it: a "#minor" only in the title is in no commit
+              # after a rebase merge, or when the squash commit's message leaves it
+              # out (v0.6.0's does). It matters when main builds the APK itself.
+              title=""
+              if [ "$release" = true ]; then
+                title=$(gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/pulls" \
+                  --jq 'first(.[] | select(.merged_at != null and .base.ref == "main")) | .title')
+              fi
+              version=$(next "$(printf '%s\n' "$title"; git log --format=%B "${last:+$last..}HEAD")")
               ;;
             *)
               # manual runs: an APK to try out
@@ -178,6 +218,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           CODE: ${{ steps.code.outputs.code }}
+          CHANGED: ${{ steps.code.outputs.changed }}
           RELEASE: ${{ steps.version.outputs.release }}
           LAST: ${{ steps.version.outputs.previous }}
         run: |
@@ -186,6 +227,10 @@ jobs:
             echo "build=true" >> "$GITHUB_OUTPUT"
             exit 0
           }
+          if [ "$CHANGED" != true ]; then
+            echo "Only the docs change: no APK to build"
+            exit 0
+          fi
           if [ "$GITHUB_EVENT_NAME" != push ] || [ "$GITHUB_REF" != refs/heads/main ]; then
             build "This run builds its own APK"
           fi
@@ -241,8 +286,9 @@ jobs:
   # Everything but pushes to main (whose pull request ran the tests).
   test:
     needs: plan
-    if: github.event_name != 'push' || github.ref != 'refs/heads/main'
+    if: (github.event_name != 'push' || github.ref != 'refs/heads/main') && needs.plan.outputs.code-changed == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     permissions:
       contents: read
     steps:
@@ -263,8 +309,9 @@ jobs:
 
       # Gradle's downloads, restored from main's cache, and a check that
       # gradle/wrapper/gradle-wrapper.jar is a genuine Gradle release. zizmor's
-      # cache-poisoning warning doesn't apply: only runs on main save this cache,
-      # so nothing from a pull request reaches anything that's released.
+      # cache-poisoning warning doesn't apply: only the cache job saves this
+      # cache, on main, so nothing from a pull request reaches anything that's
+      # released.
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
 
       - name: Unit tests
@@ -332,8 +379,9 @@ jobs:
   # in the run summary and the pull request comment; errors fail it.
   lint:
     needs: plan
-    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
+    if: (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) && needs.plan.outputs.code-changed == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 20
     permissions:
       contents: read
     steps:
@@ -375,10 +423,11 @@ jobs:
   #   zizmor      security problems (injection, credentials, cache poisoning…):
   #               fails on any finding, which are also a table in the run
   #               summary and the pull request comment, and in code scanning
+  # It needs nothing from plan, so it starts straight away.
   workflows:
-    needs: plan
     if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read
       security-events: write # zizmor's report, in code scanning
@@ -435,8 +484,9 @@ jobs:
   # (dependency-scan.yaml also runs it on main every week.)
   deps:
     needs: plan
-    if: github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')
+    if: (github.event_name != 'push' || startsWith(github.ref, 'refs/tags/')) && needs.plan.outputs.code-changed == 'true'
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     permissions:
       contents: read
     steps:
@@ -471,7 +521,8 @@ jobs:
           retention-days: 7
 
   # The release APK, with R8 and the version from plan. Not on main when the
-  # merged pull request's APK is released (then nothing is built).
+  # merged pull request's APK is released (then nothing is built), nor for a
+  # pull request that changes only the docs.
   build:
     needs: plan
     if: needs.plan.outputs.build == 'true'
@@ -484,26 +535,23 @@ jobs:
     env:
       VERSION: ${{ needs.plan.outputs.version }}
     steps:
+      # Its commit only: plan checked that a release tag is on main.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0 # for the tag check below
           persist-credentials: false
-
-      - name: Check release tag is on main
-        if: startsWith(github.ref, 'refs/tags/')
-        run: |
-          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
-            echo "::error::Tag ${GITHUB_REF_NAME} points at a commit that is not on main"
-            exit 1
-          fi
 
       - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
         with:
           distribution: temurin
           java-version: 25
 
-      # Restores main's cache only; see the test job.
+      # Restores main's cache only; see the test job. Read-only on main too: an
+      # entry of its own would be what later pull requests' build jobs restore
+      # (setup-gradle prefers the same job's), and it lacks what the tests and
+      # lint need, then goes stale.
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
+        with:
+          cache-read-only: true
 
       # Signed with Gradle's throwaway debug key: installable to try out, and
       # signed with the release key when it's released (the sign job).
@@ -578,10 +626,12 @@ jobs:
   # starts, the home screen shows, the player loads a video and minimizes,
   # search finds videos and opens a channel, nothing crashes; and cold start and
   # memory stay within their budgets.
-  # Everywhere the APK is built.
+  # Everywhere the APK is built, unless another check failed (see the top).
   smoke:
-    needs: [plan, build]
-    if: needs.build.result == 'success'
+    needs: [plan, build, test, lint, workflows, deps]
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -610,7 +660,7 @@ jobs:
           SUMMARY: ${{ runner.temp }}/smoke-summary.md
           SCREENSHOTS: ${{ runner.temp }}/smoke-screenshots
         with:
-          api-level: 35 # Android 15, which many phones run (the app targets 37, see app/build.gradle.kts)
+          api-level: 35 # Android 15, which many phones run (the app targets 36, see app/build.gradle.kts)
           target: google_apis
           arch: x86_64
           cores: 4
@@ -641,6 +691,42 @@ jobs:
           if-no-files-found: ignore
           retention-days: 7
 
+  # main, after a merge: everything pull requests run, to save Gradle's
+  # downloads for them. It's the only job that saves Gradle's cache: before it,
+  # the cache was CodeQL's, which only compiles, so each pull request downloaded
+  # what the tests and lint need from Maven Central (which sometimes answers
+  # 429 Too Many Requests), and build restored a stale entry of its own. Not a
+  # check: if it fails, the release still goes out and pull requests download
+  # what's missing.
+  cache:
+    needs: plan
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # Saves the cache at the end (setup-gradle's default on main). From main's
+      # own code only; see the test job.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
+
+      # What test, lint, deps and build run. --continue: a failure doesn't stop
+      # the rest from downloading what it needs.
+      - name: Everything pull requests run
+        run: |
+          ./gradlew --continue testDebugUnitTest createDebugUnitTestCoverageReport lintDebug assembleRelease
+          ./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath > /dev/null
+
   # The one check to require in branch rules: fails when any check failed or
   # was cancelled. (A skipped job counts as passed, so requiring build alone
   # would let a failed lint through.)
@@ -648,6 +734,7 @@ jobs:
     needs: [plan, test, lint, workflows, deps, build, smoke]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 5
     permissions: {}
     steps:
       - name: All checks passed
@@ -666,6 +753,7 @@ jobs:
     needs: [plan, test, lint, workflows, deps, build, smoke]
     if: ${{ !cancelled() && github.event_name == 'pull_request' && !github.event.pull_request.head.repo.fork }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: read # the script
       pull-requests: write # the comment
@@ -691,6 +779,7 @@ jobs:
           SHA: ${{ github.event.pull_request.head.sha }}
           BASE: ${{ github.event.pull_request.base.ref }}
           VERSION: ${{ needs.plan.outputs.version }}
+          CHANGED: ${{ needs.plan.outputs.code-changed }}
           TEST: ${{ needs.test.result }}
           LINT: ${{ needs.lint.result }}
           WORKFLOWS: ${{ needs.workflows.result }}
@@ -724,6 +813,7 @@ jobs:
     needs: [plan, checks]
     if: ${{ !cancelled() && needs.plan.outputs.release == 'true' && needs.checks.result == 'success' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     environment: release
     permissions:
       contents: read
@@ -810,6 +900,7 @@ jobs:
     needs: [plan, sign]
     if: ${{ !cancelled() && needs.sign.result == 'success' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
     permissions:
       contents: write # the tag and the release
       pull-requests: read # the merged pull requests' commits, for the notes
@@ -832,7 +923,7 @@ jobs:
         if: needs.plan.outputs.previous != ''
         continue-on-error: true
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           PREVIOUS: ${{ needs.plan.outputs.previous }}
         run: |
           .github/scripts/release-notes.sh "$PREVIOUS" "$GITHUB_SHA" > "$RUNNER_TEMP/notes.md"
@@ -842,7 +933,7 @@ jobs:
       # run again for the tag. A pushed tag already exists: the release uses it.
       - name: Tag and create GitHub Release
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
           VERSION: v${{ needs.plan.outputs.version }}
           PREVIOUS: ${{ needs.plan.outputs.previous }}
         run: |

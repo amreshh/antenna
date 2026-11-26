@@ -1,5 +1,6 @@
 package com.antenna.player
 
+import com.antenna.player.StreamPicker.DecoderFit
 import com.antenna.player.StreamPicker.Decoding
 import com.antenna.player.StreamPicker.Option
 import org.junit.Assert.assertEquals
@@ -45,6 +46,43 @@ class StreamPickerTest {
         val fps30 = option(1080, "av01.0.08M.08", 1.5, fps = 30)
         val fps60 = option(1080, "avc1.64002A", 4.0, fps = 60)
         assertEquals(fps60, pick(fps30, fps60))
+    }
+
+    @Test
+    fun `a decoder counts only if it says it can play the stream's size, frame rate and profile`() {
+        val hardware = DecoderFit(hardware = true, fits = true)
+        val software = DecoderFit(hardware = false, fits = true)
+        assertEquals(Decoding.HARDWARE, StreamPicker.decodingOf(listOf(hardware, software)))
+        // A hardware decoder that tops out at 1080p, for 2160p60.
+        assertEquals(Decoding.SOFTWARE, StreamPicker.decodingOf(listOf(hardware.copy(fits = false), software)))
+        assertEquals(Decoding.UNSUPPORTED, StreamPicker.decodingOf(listOf(hardware.copy(fits = false), software.copy(fits = false))))
+        assertEquals(Decoding.NONE, StreamPicker.decodingOf(emptyList()))
+    }
+
+    @Test
+    fun `a stream no decoder says it can play comes last`() {
+        val av1 = option(2160, "av01.0.12M.08", 8.0, Decoding.UNSUPPORTED, fps = 60)
+        val inSoftware = option(1440, "vp9", 9.0, Decoding.SOFTWARE)
+        val inHardware = option(1080, "avc1.640028", 4.0)
+        assertEquals(inHardware, pick(av1, inSoftware, inHardware))
+        assertEquals(inSoftware, pick(av1, inSoftware))
+        // Also at a quality picked in the menu.
+        val vp9 = option(2160, "vp9", 18.0, Decoding.SOFTWARE, fps = 60)
+        assertEquals(vp9, pick(av1, vp9, inHardware, preferred = 2160))
+    }
+
+    @Test
+    fun `the quality menu offers the qualities a decoder says it can play`() {
+        val separate = listOf(
+            2160 to Decoding.UNSUPPORTED, 1440 to Decoding.SOFTWARE, 1080 to Decoding.UNSUPPORTED,
+            1080 to Decoding.HARDWARE, 720 to Decoding.HARDWARE, 4320 to Decoding.NONE,
+        )
+        assertEquals(listOf(1440, 1080, 720), StreamPicker.menuQualities(separate, muxed = listOf(360)))
+        // If no decoder says so, those with a decoder at all (what the player then picks from),
+        // and if none has one, the muxed streams'.
+        val unsure = listOf(2160 to Decoding.UNSUPPORTED, 1080 to Decoding.UNSUPPORTED, 720 to Decoding.NONE)
+        assertEquals(listOf(2160, 1080), StreamPicker.menuQualities(unsure, muxed = listOf(360)))
+        assertEquals(listOf(360), StreamPicker.menuQualities(listOf(1080 to Decoding.NONE), muxed = listOf(360, 0)))
     }
 
     @Test

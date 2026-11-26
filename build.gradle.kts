@@ -1,5 +1,6 @@
-// Build toolchain that runs on Java 17–25:
-//   Gradle 9.3.1 (wrapper) + Android Gradle Plugin 9.1 + Kotlin 2.4
+// Build toolchain that runs on Java 17–25: the Gradle wrapper (its version is in
+// gradle/wrapper/gradle-wrapper.properties), the Android Gradle Plugin and Kotlin
+// (their versions are below, so this comment needn't change when they do).
 //
 // AGP 9 compiles Kotlin itself ("built-in Kotlin"), so the old
 // org.jetbrains.kotlin.android plugin is gone. The classpath line below only

@@ -186,6 +186,9 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     private val reported = mutableSetOf<String>()      // skips already reported to SponsorBlock
     private var loadJob: Job? = null
 
+    /** Looking the open video's segments up again, after Try again ([retrySegments]). */
+    private var segmentsJob: Job? = null
+
     /** Fetching fresh stream links after a playback error ([refreshStreams]). */
     private var refreshJob: Job? = null
 
@@ -338,6 +341,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         endSpan()
         saveProgress()
         loadJob?.cancel()
+        segmentsJob?.cancel()
         exoPlayer?.run {
             stop()
             clearMediaItems()
@@ -425,8 +429,8 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
      */
     private suspend fun pickStreams(info: StreamInfo, chosen: Int?): Pair<MediaSource, List<Int>> =
         withContext(Dispatchers.Default) {
-            StreamPicker.build(info, maxHeight = chosen ?: autoMaxHeight(), http = App.http, preferred = chosen) to
-                StreamPicker.qualities(info)
+            StreamPicker.build(app, info, maxHeight = chosen ?: autoMaxHeight(), http = App.http, preferred = chosen) to
+                StreamPicker.qualities(app, info)
         }
 
     /**
@@ -540,6 +544,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         timingStart = autoplay
 
         loadJob?.cancel()
+        segmentsJob?.cancel()
         player.stop()
         player.clearMediaItems()
         uiState = PlayerUiState.Loading
@@ -550,10 +555,7 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
         try {
             coroutineScope<Unit> {
                 // Look up sponsor segments in parallel with stream extraction.
-                val videoId = videoIdOf(url)
-                val segmentsJob = async {
-                    if (videoId == null) emptyList() else sponsorBlock.getSegments(videoId, prefs.skipCategories)
-                }
+                val segmentsLookup = async { lookUpSegments(url) }
 
                 val info = YouTubeRepository.streamInfo(url)
                 val video = info.toVideoItem()
@@ -602,14 +604,36 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
                 )
                 uiState = ready
 
-                segments = segmentsJob.await()
-                if (uiState is PlayerUiState.Ready) uiState = ready.copy(segments = segments)
+                showSegments(segmentsLookup.await())
             }
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
             uiState = PlayerUiState.Error(e.readable())
         }
+    }
+
+    /**
+     * The sponsor segments of the video at [url], or null when SponsorBlock couldn't be
+     * reached, even after trying again for a couple of minutes (SponsorBlockClient).
+     */
+    private suspend fun lookUpSegments(url: String): List<Segment>? {
+        val id = videoIdOf(url) ?: return emptyList()
+        return try {
+            sponsorBlock.getSegments(id, prefs.skipCategories)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            Log.w(TAG, "SponsorBlock lookup failed", e)
+            null
+        }
+    }
+
+    /** Skips [found] segments from now on, and lists them; null: the lookup failed, so nothing is skipped. */
+    private fun showSegments(found: List<Segment>?) {
+        segments = found.orEmpty()
+        val ready = uiState as? PlayerUiState.Ready ?: return
+        uiState = ready.copy(segments = found.orEmpty(), segmentsFailed = found == null)
     }
 
     /**
@@ -723,6 +747,15 @@ class PlayerViewModel(app: Application, private val saved: SavedStateHandle) : A
     fun toggleWatchLater() {
         val video = currentVideo ?: return
         toast(if (watchLater.toggle(video)) "Saved to Watch later" else "Removed from Watch later")
+    }
+
+    /** Try again under SponsorBlock, after its lookup failed: looks the open video's segments up again. */
+    fun retrySegments() {
+        val url = currentUrl ?: return
+        val ready = uiState as? PlayerUiState.Ready ?: return
+        uiState = ready.copy(segments = null, segmentsFailed = false) // "Looking up segments…"
+        segmentsJob?.cancel()
+        segmentsJob = viewModelScope.launch { showSegments(lookUpSegments(url)) }
     }
 
     /** Tapping a segment in the list plays it instead of skipping it. */

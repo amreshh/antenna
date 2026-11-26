@@ -1,7 +1,7 @@
 package com.antenna.sponsorblock
 
-import android.util.Log
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import okhttp3.Call
 import okhttp3.Callback
@@ -10,6 +10,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
+import org.json.JSONException
 import java.io.IOException
 import java.security.MessageDigest
 
@@ -50,29 +51,55 @@ enum class SponsorCategory(
  * chars of sha256(videoId), get back segments for every video sharing that prefix,
  * and pick ours out locally. The server never learns exactly what you watch.
  */
-class SponsorBlockClient(private val http: OkHttpClient) {
+class SponsorBlockClient(
+    private val http: OkHttpClient,
+    /** How long to wait before each new try of a lookup that failed. */
+    private val retryDelaysMs: List<Long> = RETRY_DELAYS_MS,
+) {
 
-    suspend fun getSegments(videoId: String, categories: Set<String>): List<Segment> =
-        withContext(Dispatchers.IO) {
-            if (categories.isEmpty()) return@withContext emptyList()
-            val prefix = sha256Hex(videoId).take(4)
-            val url = "$BASE/api/skipSegments/$prefix".toHttpUrl().newBuilder()
-                .addQueryParameter("categories", JSONArray(categories.toList()).toString())
-                .addQueryParameter("actionTypes", """["skip"]""")
-                .build()
-
+    /**
+     * The segments of [videoId] in [categories]: empty when SponsorBlock has none.
+     *
+     * A lookup that fails (no connection, or SponsorBlock answers with an error or with
+     * something unreadable) is tried again a few times over about two minutes, so a network
+     * blip as a video opens doesn't mean nothing is skipped in it. When every try fails, this
+     * throws the last one's IOException.
+     */
+    suspend fun getSegments(videoId: String, categories: Set<String>): List<Segment> {
+        if (categories.isEmpty()) return emptyList()
+        val prefix = sha256Hex(videoId).take(4)
+        val url = "$BASE/api/skipSegments/$prefix".toHttpUrl().newBuilder()
+            .addQueryParameter("categories", JSONArray(categories.toList()).toString())
+            .addQueryParameter("actionTypes", """["skip"]""")
+            .build()
+        val request = Request.Builder().url(url).build()
+        for (wait in retryDelaysMs) {
             try {
-                http.newCall(Request.Builder().url(url).build()).execute().use { resp ->
-                    // 404 just means "no segments for this prefix"
-                    if (!resp.isSuccessful) return@use emptyList<Segment>()
-                    val body = resp.body.string()
-                    parse(body, videoId)
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "SponsorBlock lookup failed", e)
-                emptyList()
+                return lookUp(request, videoId)
+            } catch (_: IOException) {
+                delay(wait)
             }
         }
+        return lookUp(request, videoId)
+    }
+
+    /**
+     * One try. Throws IOException when SponsorBlock can't be reached, answers with an error, or
+     * sends something that isn't its list of segments (a Wi-Fi login page, say).
+     */
+    private suspend fun lookUp(request: Request, videoId: String): List<Segment> = withContext(Dispatchers.IO) {
+        http.newCall(request).execute().use { resp ->
+            when {
+                resp.code == 404 -> emptyList() // no segments for any video with this prefix
+                !resp.isSuccessful -> throw IOException("SponsorBlock answered HTTP ${resp.code}")
+                else -> try {
+                    parse(resp.body.string(), videoId)
+                } catch (e: JSONException) {
+                    throw IOException("SponsorBlock's answer couldn't be read", e)
+                }
+            }
+        }
+    }
 
     /** Tells SponsorBlock a segment was skipped (feeds the public "time saved" stats). */
     fun reportSkip(uuid: String) {
@@ -112,6 +139,8 @@ class SponsorBlockClient(private val http: OkHttpClient) {
 
     private companion object {
         const val BASE = "https://sponsor.ajay.app"
-        const val TAG = "SponsorBlock"
+
+        /** 5 tries over about two minutes: a blip is over in seconds, a busy server takes longer. */
+        val RETRY_DELAYS_MS = listOf(2_000L, 10_000L, 30_000L, 60_000L)
     }
 }
