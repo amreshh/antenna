@@ -1,7 +1,7 @@
 package com.antenna.data
 
 /**
- * Guesses what each subscribed channel is about, for the Subscriptions tab's "Topic" order,
+ * Guesses what each subscribed channel is about, for the Subscriptions tab's "Categories" order,
  * from what's already on the phone (no requests):
  *  - YouTube's category of the videos you watched from it (saved with your history), which
  *    counts most;

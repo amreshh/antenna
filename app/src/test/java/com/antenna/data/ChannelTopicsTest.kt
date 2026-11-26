@@ -7,7 +7,7 @@ import com.antenna.data.TestData.watched
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
-/** Guessing a channel's topic for the Subscriptions tab's "Topic" order. */
+/** Guessing a channel's topic for the Subscriptions tab's "Categories" order. */
 class ChannelTopicsTest {
 
     @Test

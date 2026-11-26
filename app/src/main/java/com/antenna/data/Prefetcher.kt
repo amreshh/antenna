@@ -24,8 +24,10 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Gets the videos you're likely to open ready before you tap them. Most of the wait when a
  * video starts is fetching its details and links (1–3 s; buffering is a fraction of that),
- * so when the app opens it guesses a few videos (Guesses.kt) and fetches their details:
- * only those, a few small requests each, never any video.
+ * so at the moments you're about to pick one it guesses a few (Guesses.kt) and fetches their
+ * details: only those, a few small requests each, never any video. The moments: the app
+ * opening, the video playing nearing its end (its Up next list), picking a channel in the
+ * Subscriptions list, and For you loading afresh. Each keeps its own score.
  *
  * Every guess is checked against what you open, fetched or not, and kept with the score in
  * a file in the app's files (nothing leaves the phone). That decides what's guessed, and
@@ -88,14 +90,58 @@ class Prefetcher private constructor(context: Context) {
         val feed = shown[GuessReason.NewUpload] ?: feedCache.read()?.items.orEmpty().filter { it.channelUrl in subscribed }
         val candidates = candidates(entries, watchLater.videos.value, shown[GuessReason.ForYou].orEmpty(), feed, now)
         val log = withContext(oneAtATime) { _log.value } // after the file is read, and changes so far
-        val picks = rankCandidates(candidates, entries, log, now).take(GuessLog.GUESSES)
+        val picks = rankCandidates(candidates, entries, log, now).filter { it.video.notIn(log.unsettledIds(now)) }.take(GuessLog.GUESSES)
+        fetchGuesses(GuessMoment.AppOpen, picks, log, now)
+    }
+
+    /** The video playing is near its end: you're likely to open one at the top of its [upNext] list. */
+    fun onVideoEnding(upNext: List<VideoItem>) = roundAt(GuessMoment.VideoEnding, OpenSource.UpNext) { entries, log, now ->
+        rankCandidates(upNextCandidates(upNext), entries, log, now)
+    }
+
+    /**
+     * You picked the channel at [channelUrl] in the Subscriptions list, whose videos are in
+     * [feed]: likely, where you left off in it, or the next in line, or its newest.
+     */
+    fun onChannelPicked(channelUrl: String, feed: List<VideoItem>) = roundAt(GuessMoment.ChannelPicked, list = null) { entries, _, now ->
+        channelCandidates(channelUrl, entries, feed, now)
+    }
+
+    /** For you loaded afresh, as [list]: you're likely to open one at its top. */
+    fun onForYouLoaded(list: List<VideoItem>) = roundAt(GuessMoment.ForYouLoaded, OpenSource.ForYou) { entries, log, now ->
+        rankCandidates(forYouCandidates(list), entries, log, now)
+    }
+
+    /**
+     * Guesses at [moment], from what [pick] says is likeliest, and fetches what's worth it.
+     * From a [list] you tap videos in (Up next, For you): as many as your taps there usually
+     * go deep (TapPositions.depth).
+     */
+    private fun roundAt(moment: GuessMoment, list: OpenSource?, pick: (Collection<WatchEntry>, GuessLog, Long) -> List<Candidate>) {
+        if (!prefs.prefetch) return
+        work.launch {
+            history.awaitLoaded()
+            val now = System.currentTimeMillis()
+            val log = withContext(oneAtATime) { _log.value }
+            val entries = history.entries.value.values
+            val howMany = list?.let { tapPositions(log.opens).depth(it, GuessLog.MOMENT_GUESSES) } ?: GuessLog.MOMENT_GUESSES
+            val picks = pick(entries, log, now).filter { it.video.notIn(log.unsettledIds(now)) }.take(howMany)
+            fetchGuesses(moment, picks, log, now)
+        }
+    }
+
+    /** Not a video already guessed, and still waiting to be opened. */
+    private fun VideoItem.notIn(guessed: Set<String>): Boolean = videoIdOf(url)?.let { it !in guessed } == true
+
+    /** Notes [picks] as guesses at [moment], and fetches as many as its score says ([fetchCount]). */
+    private suspend fun fetchGuesses(moment: GuessMoment, picks: List<Candidate>, log: GuessLog, now: Long) {
         if (picks.isEmpty()) return
-        val fetch = fetchCount(log, now)
+        val fetch = fetchCount(log, now, moment)
         val guesses = picks.mapIndexed { i, c ->
-            Guess(videoIdOf(c.video.url)!!, now, c.reason, c.video.channelKey(), rank = i + 1, fetched = i < fetch)
+            Guess(videoIdOf(c.video.url)!!, now, c.reason, c.video.channelKey(), rank = i + 1, fetched = i < fetch, moment = moment)
         }
         change { it.guessed(guesses, now) }
-        Log.i(TAG, "Guessed ${guesses.joinToString { "${it.videoId} (${it.reason})" }}; fetching $fetch")
+        Log.i(TAG, "$moment: guessed ${guesses.joinToString { "${it.videoId} (${it.reason})" }}; fetching $fetch")
         guesses.filter { it.fetched }.forEachIndexed { i, g ->
             try {
                 YouTubeRepository.prefetch(watchUrl(g.videoId))
@@ -115,11 +161,14 @@ class Prefetcher private constructor(context: Context) {
         }
     }
 
-    /** You opened [url]: tapped it, or a link to it (not Back to it, or the player reopening it). */
-    fun onVideoOpened(url: String) {
+    /**
+     * You opened [url] from [source], at [position] in its list (-1: not from a list, or not
+     * known): tapped it, or a link to it (not Back to it, or the player reopening it).
+     */
+    fun onVideoOpened(url: String, source: OpenSource? = null, position: Int = -1) {
         val id = videoIdOf(url) ?: return
         val now = System.currentTimeMillis()
-        change { it.opened(id, now) }
+        change { it.opened(id, now, source, position) }
     }
 
     /** The video at [url] started playing; fetching its details took [detailsMs]. */

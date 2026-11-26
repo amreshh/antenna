@@ -152,6 +152,104 @@ class GuessesTest {
     }
 
     @Test
+    fun `each moment keeps its own score`() {
+        // When the app opens, its guesses keep missing: none fetched there.
+        val missing = (1..20).map { round(it, rank = 1, used = it == 1, at = NOW - 3 * hour + it * minute) }
+        val log = GuessLog(guesses = missing)
+        assertEquals(0, fetchCount(log, NOW, GuessMoment.AppOpen))
+        // Near the end of a video it hasn't guessed yet: its first guess is fetched.
+        assertEquals(1, fetchCount(log, NOW, GuessMoment.VideoEnding))
+        val upNextHits = (21..30).map { guess(it, at = NOW - 2 * hour, used = it % 2 == 0).copy(moment = GuessMoment.VideoEnding) }
+        assertEquals(1, fetchCount(GuessLog(guesses = missing + upNextHits), NOW, GuessMoment.VideoEnding))
+        assertEquals(0, fetchCount(GuessLog(guesses = missing + upNextHits), NOW, GuessMoment.AppOpen))
+    }
+
+    @Test
+    fun `a picked channel guesses where you left off first, then the next in line, then its newest`() {
+        val series = channelUrl("series")
+        val feed = (1..5).map { upload(it, "series", daysOld = 10 - it) } // video 5 is the newest
+        val history = listOf(
+            watched(feed[1], daysAgo = 3.0), // finished video 2
+            watched(video(9, channel = "series"), fraction = 0.4, daysAgo = 1.0), // started, not finished
+        )
+        val picks = channelCandidates(series, history, feed, NOW)
+        assertEquals(listOf(id(9), id(3), id(5)), ids(picks)) // left off, next after 2, newest
+        assertEquals(listOf(Unfinished, GuessReason.NextInLine, NewUpload), picks.map { it.reason })
+        // A channel never finished: its newest.
+        assertEquals(listOf(id(5)), ids(channelCandidates(series, emptyList(), feed, NOW)))
+    }
+
+    @Test
+    fun `the top of Up next and of For you, in their order`() {
+        val list = (1..7).map { video(it) }
+        assertEquals((1..5).map { id(it) }, ids(upNextCandidates(list)))
+        assertEquals(GuessReason.UpNext, upNextCandidates(list).first().reason)
+        assertEquals(listOf(0, 1, 2, 3, 4), forYouCandidates(list).map { it.position })
+    }
+
+    @Test
+    fun `a video still waiting to be opened after a guess isn't guessed again meanwhile`() {
+        val log = GuessLog(guesses = listOf(guess(1, at = NOW - 10 * minute), guess(2, at = NOW - hour), guess(3, at = NOW - 5 * minute, used = true)))
+        assertEquals(setOf(id(1)), log.unsettledIds(NOW))
+    }
+
+    @Test
+    fun `how many opened videos were ready, by where they were opened from`() {
+        val log = GuessLog()
+            .guessed(listOf(guess(1, at = NOW - minute)), NOW - minute)
+            .opened(id(1), NOW, OpenSource.UpNext)
+            .opened(id(2), NOW, OpenSource.UpNext)
+            .opened(id(3), NOW, OpenSource.Subscriptions)
+            .opened(id(4), NOW) // from before sources were recorded
+        val s = guessStats(log, NOW)
+        assertEquals(listOf(SourceReady(OpenSource.UpNext, 2, 1), SourceReady(OpenSource.Subscriptions, 1, 0)), s.bySource)
+        assertEquals(listOf(GuessMoment.AppOpen), s.moments.map { it.moment })
+    }
+
+    // --- Where in a list you tap --------------------------------------------------------
+
+    /** [n] taps in [source]'s list at [position]. */
+    private fun taps(source: OpenSource, position: Int, n: Int) = (1..n).map { Opened(id(500 + it), NOW, ready = false, source = source, position = position) }
+
+    @Test
+    fun `before there are enough taps, the higher up the likelier, and the usual number of guesses`() {
+        val taps = tapPositions(taps(OpenSource.UpNext, position = 0, n = 4))
+        assertEquals(null, taps.usual(OpenSource.UpNext))
+        assertEquals(2, taps.depth(OpenSource.UpNext, default = 2))
+        assertTrue(taps.share(OpenSource.ForYou, 0) > taps.share(OpenSource.ForYou, 1))
+    }
+
+    @Test
+    fun `nearly always the first in Up next gives one guess, spread over For you goes deeper`() {
+        val opens = taps(OpenSource.UpNext, position = 0, n = 9) + taps(OpenSource.UpNext, position = 2, n = 1) +
+            (0..4).flatMap { p -> taps(OpenSource.ForYou, position = p, n = 2) }
+        val taps = tapPositions(opens)
+        assertEquals(1, taps.usual(OpenSource.UpNext))
+        assertEquals(1, taps.depth(OpenSource.UpNext, default = 2))
+        assertEquals(4, taps.usual(OpenSource.ForYou)) // 70% of 10 taps are within the top 4
+        assertEquals(4, taps.depth(OpenSource.ForYou, default = 2))
+        assertEquals(3, taps.depth(OpenSource.ForYou, default = 2, max = 3))
+    }
+
+    @Test
+    fun `a place you often tap ranks its video above the ones above it`() {
+        // In For you you mostly take the third.
+        val log = GuessLog(opens = taps(OpenSource.ForYou, position = 2, n = 12))
+        val list = (1..5).map { video(it, channel = "c") }
+        assertEquals(id(3), ids(rankCandidates(forYouCandidates(list), emptyList(), log, NOW, utc)).first())
+        // Without those taps, the top one.
+        assertEquals(id(1), ids(rankCandidates(forYouCandidates(list), emptyList(), GuessLog(), NOW, utc)).first())
+    }
+
+    @Test
+    fun `where in its list a video was opened is noted, and shown with where it was opened from`() {
+        val log = GuessLog().opened(id(1), NOW, OpenSource.UpNext, position = 0)
+        assertEquals(0, log.opens.single().position)
+        val many = GuessLog(opens = taps(OpenSource.UpNext, position = 0, n = 6))
+        assertEquals(1, guessStats(many, NOW).bySource.single().usualDepth)
+    }
+
+    @Test
     fun `guesses still within their half hour don't count yet`() {
         val pending = (1..20).map { round(it, rank = 1, used = false, at = NOW - 10 * minute) }
         assertEquals(1, fetchCount(GuessLog(guesses = pending), NOW)) // too early to tell
@@ -225,12 +323,22 @@ class GuessesTest {
     @Test
     fun `the log reads back as it was written, and a bad record is left out`() {
         val log = GuessLog(
-            guesses = listOf(guess(1, channel = channelUrl("a"), used = true), guess(2, reason = Unfinished, rank = 2, fetched = false)),
-            opens = listOf(Opened(id(1), NOW, ready = true, detailsMs = 120), Opened(id(2), NOW, ready = false)),
+            guesses = listOf(
+                guess(1, channel = channelUrl("a"), used = true),
+                guess(2, reason = Unfinished, rank = 2, fetched = false).copy(moment = GuessMoment.ChannelPicked),
+                guess(3, reason = GuessReason.UpNext).copy(moment = GuessMoment.VideoEnding),
+            ),
+            opens = listOf(Opened(id(1), NOW, ready = true, detailsMs = 120, source = OpenSource.UpNext, position = 3), Opened(id(2), NOW, ready = false)),
             pausedUntil = NOW + hour,
         )
         assertEquals(log, guessLogFromJson(log.toJson()))
         val damaged = log.toJson().replace("\"Unfinished\"", "\"NoSuchReason\"")
-        assertEquals(1, guessLogFromJson(damaged).guesses.size)
+        assertEquals(2, guessLogFromJson(damaged).guesses.size)
+        // Older records had no moment or source: the app opening, and not known.
+        val old = guessLogFromJson("""{"guesses":[{"id":"${id(1)}","at":1,"reason":"ForYou","channel":"c","rank":1,"fetched":true,"used":false}],""" +
+            """"opens":[{"id":"${id(1)}","at":2,"ready":false,"details":-1}],"pausedUntil":0}""")
+        assertEquals(GuessMoment.AppOpen, old.guesses.single().moment)
+        assertEquals(null, old.opens.single().source)
+        assertEquals(-1, old.opens.single().position)
     }
 }

@@ -42,6 +42,23 @@ class WatchEntryAndFormatTest {
     }
 
     @Test
+    fun `upload times read like YouTube's, never a made-up date`() {
+        val minute = 60_000L
+        val day = 24 * 60 * minute
+        assertEquals("just now", timeAgo(30_000))
+        assertEquals("1 minute ago", timeAgo(minute))
+        assertEquals("5 hours ago", timeAgo(5 * 60 * minute + 59 * minute))
+        assertEquals("1 day ago", timeAgo(day))
+        assertEquals("6 days ago", timeAgo(6 * day))
+        assertEquals("1 week ago", timeAgo(7 * day))
+        assertEquals("4 weeks ago", timeAgo(29 * day))
+        assertEquals("1 month ago", timeAgo(30 * day))
+        assertEquals("12 months ago", timeAgo(364 * day))
+        assertEquals("17 years ago", timeAgo(17 * 365 * day + 3 * day)) // YouTube's rough "17 years ago", as it said
+        assertEquals("upcoming", timeAgo(-minute))
+    }
+
+    @Test
     fun `durations read like YouTube's`() {
         assertEquals("", formatDuration(0))
         assertEquals("0:07", formatDuration(7))

@@ -34,6 +34,14 @@ class NewUploadsTest {
     }
 
     @Test
+    fun `in the New activity order, channels with new uploads come first, then the newest`() {
+        val channels = listOf("seen", "new", "older", "quiet").map { Channel(channelUrl(it), it) }
+        val feed = listOf(upload(1, "seen", daysAgo = 0.1), upload(2, "new", daysAgo = 2.0), upload(3, "older", daysAgo = 3.0))
+        val order = newActivityOrder(channels, feed, withNew = setOf(channelUrl("new"), channelUrl("older")))
+        assertEquals(listOf("new", "older", "seen", "quiet"), order.map { it.name })
+    }
+
+    @Test
     fun `an upload of unknown date, or older than a week, isn't new`() {
         val feed = listOf(video(1, channel = "a", uploadedAtMs = 0), upload(2, "b", daysAgo = NEW_UPLOAD_DAYS + 0.5))
         assertEquals(emptySet<String>(), channelsWithNewUploads(feed, emptyMap(), NOW))

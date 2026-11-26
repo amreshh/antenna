@@ -15,7 +15,7 @@ class WatchHistoryFilesTest {
 
     private fun history() = mapOf(
         id(1) to watched(video(1), fraction = 0.5, related = listOf(video(10), video(11)))
-            .copy(category = "Music", tags = listOf("synth", "80s"), skipped = listOf(SkippedSegment("sponsor", 12_000, 45_000))),
+            .copy(category = "Music", skipped = listOf(SkippedSegment("sponsor", 12_000, 45_000))),
         id(2) to watched(video(2), fraction = 1.0, daysAgo = 1.0),
     )
 

@@ -89,13 +89,23 @@
   no video lengths, so they're fetched from each channel's Videos tab (about 45 KB) only for
   videos on screen, once per channel, and kept with the feed.
 - **Likely videos start sooner:** most of the wait when a video starts is fetching its details
-  and links, so when the app opens it guesses up to 3 videos you're likely to watch (one you
-  didn't finish, the newest in Watch later, the top of For you, new uploads, and the next video
-  of a channel you're working through in order) and fetches their details, never any video.
-  It ranks them by which channels you watch at this time of day, and keeps score: every guess is checked against what you open, kinds of guess and channels that
-  keep missing go down, and it fetches fewer, or none, while its guesses aren't opened. It keeps
-  guessing without fetching, and starts again once they'd be right. Analytics shows how it's
-  doing (Ready before you tapped), and Settings turns it off.
+  and links, so at the moments you're about to pick a video, it guesses the likeliest and
+  fetches their details, never any video:
+  - **when the app opens:** up to 3 (one you didn't finish, the newest in Watch later, the top
+    of For you, new uploads, and the next video of a channel you're working through in order),
+    ranked by which channels you watch at this time of day;
+  - **near the end of a video:** the top of its Up next list;
+  - **when you pick a channel** in the Subscriptions list: where you left off in it (a video you
+    started), else the one after the last you finished, else its newest;
+  - **when For you loads afresh:** its top.
+
+  It keeps score at each moment on its own: every guess is checked against what you open,
+  kinds of guess and channels that keep missing go down, and a moment whose guesses aren't
+  opened fetches fewer, or none. It also notes how far down each list you tap: if you nearly
+  always take the first video in Up next, that's the one it guesses; if your taps in For you
+  spread over the top four, it guesses four (and ranks a place you often tap higher). It keeps guessing without fetching, and starts again once
+  they'd be right. Analytics shows how it's doing (Ready before you tapped), with how many of
+  the videos you opened were ready by where you opened them, and Settings turns it off.
 - **Watch later:** save any video from its ⋮ menu, or with Watch later under the one you're
   watching. The Watch later tab lists them, newest first; Remove watched clears the ones
   you've finished.
@@ -114,35 +124,37 @@
   else. Shorts are kept apart: the feed shows the
   other videos, and the Shorts chip above them shows the Shorts, in a grid of tall
   thumbnails. On tablets your channels are
-  listed beside them, by newest activity, A–Z or topic; tap one to see only its videos. A blue
+  listed beside them, by new activity, A–Z or category; tap one to see only its videos. A blue
   dot, like YouTube's, marks a channel with an upload from the last week that wasn't there yet
-  when you last opened it in that list. Import your existing YouTube
+  when you last opened it in that list. In the New activity order the channels with a dot come
+  first; the one you open stays where it is until you pick another, then goes down with the ones
+  you've seen. Import your existing YouTube
   subscriptions from Google Takeout ([below](#importing-your-youtube-subscriptions)), and export
   them as the same kind of file.
 - **Subscriptions cleanup** (Subscriptions → ✏️ → ⋮ → Clean up): checks every channel, then
   lists the ones that don't exist anymore and the ones with no upload in a period you choose (3
   months to 5 years), each with its reason, before removing anything. Untick a channel to keep
   it; channels that couldn't be checked are always kept.
-- **Analytics** tab: what your watch history says, worked out on the phone. Videos, watch
-  time, channels and how many you finish; **watch time** in one chart, by day for the last 30
-  days at first: pinch to zoom in to the hours you watch at, or out to weeks, and drag to go
-  back through your history; your top channels; what SponsorBlock skipped for you (the time,
-  and which kinds: sponsors, self promotion…); and how far you get into videos. **Topics**:
-  what you watch about, from video titles and the uploaders' tags, and YouTube's categories
-  (saved with each video you watch).
-  **Tap any bar** to narrow the whole tab to its videos: a day, an hour of a day, a channel, a
-  topic, a kind of skipped segment… Picks in different cards combine. The bar at the top lists them
-  (with Open channel, or Search for a topic); × or Back takes one off. **Ready before you
-  tapped**: how many of the videos you opened the app had ready, how often each kind of guess
-  was opened, and what it fetches now.
-  More cards: **Subscriptions** (watch time from channels you subscribe to and from the rest;
-  channels you watch a lot without subscribing, with Subscribe; subscriptions you haven't
-  watched in 3 months, with Unsubscribe), **Video length** (and how many of each you finish),
-  **Where you open videos** (For you, Subscriptions, Up next, search…), **How new** videos
-  were when you first watched them, and **Sittings** (how often you sit down to watch, for how
-  long, what you actually played, days in a row, and videos you played part of again). The
-  top tiles compare the last 7 days with the 7 before. Length, where from, how new and
-  subscribed or not are picks too.
+- **Analytics** tab: what your watch history says, worked out on the phone. A range at the top
+  (7 days, 30 days or all time) that every card follows, with what it covers; tiles for watch
+  time, videos, channels and your day streak (with the change on the days before, once the
+  history goes back that far); then the cards in sections. **Your viewing**: watch time in one
+  chart, by day from the first day watched in the range, with each day's time on its bar, the
+  busiest day, the daily average and the hour you usually watch; pinch to zoom in to the hours
+  of a few days or out to weeks, and drag to go back. Then sittings (how often you sit down to
+  watch, videos per sitting, what was actually played), how much you finish (one bar for the
+  whole), video length and how new videos were when you watched them. **What you watch**: top
+  channels and YouTube's categories (the top ones, See all for the rest), and what you hid
+  from For you, with Show again. **How you find videos**: where you open videos (For you,
+  Subscriptions, Up next, search…) and your subscriptions' share of your watch time, with the
+  channels you came back to without subscribing (Subscribe) and, once the history goes back
+  3 months, the subscriptions you haven't watched (Unsubscribe). **App**: what SponsorBlock
+  skipped for you, and how many of the videos you opened the app had ready (Ready before you
+  tapped), by kind of guess.
+  **Tap any row with a ›, or a bar of the chart,** to narrow the whole tab to its videos: a
+  day, an hour of a day, a channel, a category, a kind of skipped segment… Picks in different
+  cards combine. The bar at the top lists them (with Open channel for a channel); × or Back
+  takes one off.
 - **The watch log:** besides the history (how far into each video you got, and when you last
   watched it), the app records each stretch of watching: which part of the video played, when,
   and where you opened it from. A pause, a seek, a SponsorBlock skip or another video ends a
@@ -151,8 +163,8 @@
   backups, kept 400 days); removing a video from the history, or clearing it, removes its
   stretches too.
 - **Up next** under every video (Back returns to the previous one), and a **For you** home tab
-  built from YouTube's suggestions for what you've watched ([below](#how-for-you-works)). The
-  logo at the top goes back to it.
+  built from YouTube's suggestions for what you've watched ([below](#how-for-you-works)), with
+  each video's channel picture (tap it for the channel). The logo at the top goes back to it.
 - **History, like YouTube:** a red progress bar under every thumbnail you've started, "WATCHED"
   near the end, and a History tab. Watched videos can be hidden from the Subscriptions feed.
 - **Tablets and foldables:** the lists become a grid of large thumbnails, with more columns
@@ -195,13 +207,24 @@ doesn't support signing in. Signing in would also defeat the privacy point and c
 account flagged. So Antenna builds its own version from YouTube's recommendations:
 
 1. Each time you open a video, YouTube's "Up next" list for it is saved with your history.
-2. The For you tab combines those lists from your last ~30 videos. A video gets ranked higher when:
+2. The For you tab combines those lists from your last 100 videos. A video gets ranked higher when:
    it's suggested after several things you watched, it comes from recent or fully watched videos,
-   YouTube put it near the top of its list, or it's from a channel you subscribe to.
-   Videos you've already watched are left out, and no channel gets more than 3 spots near the top.
-3. Pull down to reshuffle a little.
+   YouTube put it near the top of its list, or it's from a channel you watch a lot or subscribe to.
+   New uploads from the channels you watch most but don't subscribe to are mixed in.
+3. What you don't want counts too, like on YouTube:
+   - A video you leave in its first 30 seconds doesn't count: its Up next list is ignored, it
+     isn't suggested again, and its channel ranks a little lower. What was actually played comes
+     from the watch log (videos from before it go by how far in the history says you got).
+   - Each day a video was shown and you passed it over, it ranks lower, so the list changes from
+     one visit to the next. It loads afresh when the app starts, when you pull down, and when you
+     come back to the tab after half an hour; never while you scroll.
+   - **⋮ → Not interested** removes a video (its channel ranks a little lower), and **⋮ → Don't
+     recommend channel** removes a channel's videos, both with Undo. The Analytics tab lists them
+     (Not interested), to show them again.
+4. Videos you've finished are left out, and no channel gets more than 3 spots near the top.
 
-Everything runs on the phone with no extra network requests. To tune it, change the weights in `Recommender.kt`.
+All of it stays on the phone. The only requests are the RSS feeds of the channels you watch most
+but don't subscribe to, one small request each. To tune it, change the weights in `Recommender.kt`.
 
 ## Importing your YouTube subscriptions
 
@@ -214,8 +237,8 @@ Takeout's file has no channel pictures, so Antenna fetches each imported channel
 at a time, after the feed has loaded. **⋮ → Export as CSV** on the same screen saves your
 subscriptions in Takeout's format, for importing elsewhere (or back here).
 
-The Topic order guesses what each channel is about, from what's already on the phone:
-YouTube's category of the videos you watched from it, its name, and its recent titles.
+The Categories order guesses each channel's YouTube category from what's already on the
+phone: the category of the videos you watched from it, its name, and its recent titles.
 
 ## When it stops working
 
@@ -340,7 +363,7 @@ app/src/main/java/com/antenna/
 ├── player/SeekBarSegments.kt     draws the SponsorBlock segments on the seek bar
 ├── data/WatchStats.kt            the Analytics numbers, and narrowing them to what's picked
 ├── data/Guesses.kt               guessing what you'll open next, and keeping score of the guesses
-├── data/Prefetcher.kt            fetches the likeliest guesses' details when the app opens
+├── data/Prefetcher.kt            fetches the likeliest guesses' details at the moments you pick
 ├── data/WatchLog.kt              each stretch of watching (the watch log), and sittings from it
 ├── sponsorblock/SponsorBlockClient.kt   segment lookup + skip reporting
 └── ui/                           Compose screens: search, subscriptions feed, channel list,
@@ -361,7 +384,6 @@ art/logo.svg                      the logo; the launcher icon (res/drawable) is 
 - A background refresh of the feed with new-video notifications (WorkManager)
 - Subtitles (`info.subtitles` → `MediaItem.SubtitleConfiguration`)
 - Targeting Android 17 (API 37) once it's checked on a real Android 17 phone (see `targetSdk` in `app/build.gradle.kts`)
-- "Not interested" on For you items (save a block list of video ids / channels in `Recommender`)
 - DeArrow (crowdsourced titles and thumbnails, from the same team as SponsorBlock)
 
 ## License and legal

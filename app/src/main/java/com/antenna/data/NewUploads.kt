@@ -52,6 +52,23 @@ class SeenUploads private constructor(context: Context) {
 }
 
 /**
+ * The New activity order of the channel list: the channels with an upload you haven't seen
+ * ([withNew], their urls) first, then the rest; each newest upload in [feed] first, then A–Z.
+ */
+fun newActivityOrder(channels: List<Channel>, feed: List<VideoItem>, withNew: Set<String>): List<Channel> {
+    val newest = HashMap<String, Long>()
+    feed.forEach { v ->
+        val url = v.channelUrl ?: return@forEach
+        if (v.uploadedAtMs > (newest[url] ?: 0L)) newest[url] = v.uploadedAtMs
+    }
+    return channels.sortedWith(
+        compareByDescending<Channel> { it.url in withNew }
+            .thenByDescending { newest[it.url] ?: 0L }
+            .thenBy { it.name.lowercase() },
+    )
+}
+
+/**
  * The channels (urls) with a new upload in [feed]: one from the last [NEW_UPLOAD_DAYS] days
  * that wasn't in the feed yet when the channel was last opened ([seen], video ids by channel).
  * Shorts count: they're uploads too.

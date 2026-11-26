@@ -262,9 +262,9 @@ internal val ChannelSaver = listSaver<Channel?, String?>(
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MainScreen(onOpenVideo: (String, OpenSource) -> Unit, channel: Channel?, onChannelChange: (Channel?) -> Unit) {
+fun MainScreen(onOpenVideo: (String, OpenSource, Int) -> Unit, channel: Channel?, onChannelChange: (Channel?) -> Unit) {
     /** Opens a video, noting where from (the watch log's "Where you open videos"). */
-    fun openFrom(source: OpenSource): (String) -> Unit = { url -> onOpenVideo(url, source) }
+    fun openFrom(source: OpenSource): OpenVideo = { url, position -> onOpenVideo(url, source, position) }
     var tab by rememberSaveable { mutableStateOf(Tab.ForYou) }
     var overlay by rememberSaveable { mutableStateOf<Overlay?>(null) }
     /** Search (the magnifier in the top bar): shown in place of the current tab. */
@@ -329,7 +329,15 @@ fun MainScreen(onOpenVideo: (String, OpenSource) -> Unit, channel: Channel?, onC
                 return@Scaffold
             }
             TopAppBar(
-                title = { AntennaLogo(onClick = { tab = Tab.ForYou }) },
+                title = {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        AntennaLogo(onClick = { tab = Tab.ForYou })
+                        // The other tabs say what they are with their lists; Analytics is a page of its own.
+                        if (tab == Tab.Analytics) {
+                            Text("Analytics", style = MaterialTheme.typography.titleLarge, modifier = Modifier.padding(start = 12.dp))
+                        }
+                    }
+                },
                 actions = {
                     IconButton(onClick = { searching = true }) {
                         Icon(Icons.Default.Search, contentDescription = "Search")
@@ -378,7 +386,7 @@ fun MainScreen(onOpenVideo: (String, OpenSource) -> Unit, channel: Channel?, onC
                     return@SaveableStateProvider
                 }
                 when (tab) {
-                    Tab.ForYou -> ForYouTab(viewModel<ForYouViewModel>(), openFrom(OpenSource.ForYou), modifier)
+                    Tab.ForYou -> ForYouTab(viewModel<ForYouViewModel>(), openFrom(OpenSource.ForYou), onChannelChange, modifier)
                     Tab.Subscriptions -> FeedTab(
                         vm = viewModel<FeedViewModel>(),
                         onOpenVideo = openFrom(OpenSource.Subscriptions),
@@ -388,18 +396,7 @@ fun MainScreen(onOpenVideo: (String, OpenSource) -> Unit, channel: Channel?, onC
                     )
                     Tab.WatchLater -> WatchLaterTab(openFrom(OpenSource.WatchLater), modifier)
                     Tab.History -> HistoryTab(openFrom(OpenSource.History), modifier)
-                    Tab.Analytics -> {
-                        val search = viewModel<SearchViewModel>()
-                        AnalyticsTab(
-                            onOpenChannel = onChannelChange,
-                            // a topic: search for it, as if typed
-                            onSearch = { topic ->
-                                search.searchFor(topic)
-                                searching = true
-                            },
-                            modifier = modifier,
-                        )
-                    }
+                    Tab.Analytics -> AnalyticsTab(onOpenChannel = onChannelChange, modifier = modifier)
                 }
             }
         }
@@ -621,7 +618,7 @@ private fun SearchField(vm: SearchViewModel) {
 @Composable
 private fun SearchResults(
     vm: SearchViewModel,
-    onOpenVideo: (String) -> Unit,
+    onOpenVideo: OpenVideo,
     onOpenChannel: (Channel) -> Unit,
     modifier: Modifier,
 ) {
@@ -646,7 +643,7 @@ private fun SearchResults(
         }
 
         VideoGrid(Modifier.fillMaxSize()) { wide ->
-            videoItems(state.items, wide, onClick = { onOpenVideo(it.url) }, onChannelClick = onOpenChannel)
+            videoItems(state.items, wide, onClick = { onOpenVideo(it.url, positionOf(state.items, it)) }, onChannelClick = onOpenChannel)
             if (state.loading || state.canLoadMore) {
                 fullWidthItem {
                     if (state.canLoadMore && !state.loading) {

@@ -10,7 +10,8 @@ import kotlin.math.abs
  * Guessing which videos you'll open next, so Prefetcher can fetch their details before you
  * tap them, and keeping score: every guess is checked against what you open, fetched or
  * not. The score decides what's guessed (which kinds of guess, and which channels, tend to
- * be opened) and how many guesses are fetched (none, while they keep missing).
+ * be opened) and how many guesses are fetched at each moment it guesses (none, while they
+ * keep missing).
  */
 
 /** Where a guess came from. */
@@ -32,6 +33,24 @@ enum class GuessReason {
      * newest one you've finished ([nextInLine]).
      */
     NextInLine,
+
+    /** Near the top of the Up next list of the video you're watching. */
+    UpNext,
+}
+
+/** When a guess was made: each moment keeps its own score, so one that keeps missing stops fetching by itself. */
+enum class GuessMoment {
+    /** The app came onto the screen. */
+    AppOpen,
+
+    /** The video playing is near its end: what you'll open from its Up next list. */
+    VideoEnding,
+
+    /** You picked a channel in the Subscriptions list: the video of it you'll open. */
+    ChannelPicked,
+
+    /** For you loaded afresh (pulled down, or back after a while): what's at its top. */
+    ForYouLoaded,
 }
 
 /** A video that could be guessed: where it came from, and how far down that list it is (0 at the top). */
@@ -50,10 +69,22 @@ data class Guess(
     val fetched: Boolean,
     /** Opened within [GuessLog.WINDOW_MS] of being guessed. */
     val used: Boolean = false,
+    val moment: GuessMoment = GuessMoment.AppOpen,
 )
 
-/** A video you opened: whether a guess had it ready, and how long its details took (-1 until it started). */
-data class Opened(val videoId: String, val at: Long, val ready: Boolean, val detailsMs: Long = -1)
+/**
+ * A video you opened: whether a guess had it ready, how long its details took (-1 until it
+ * started), where you opened it from (null in older records), and where it was in that
+ * list (0 at the top; -1 when not known, or not from a list).
+ */
+data class Opened(
+    val videoId: String,
+    val at: Long,
+    val ready: Boolean,
+    val detailsMs: Long = -1,
+    val source: OpenSource? = null,
+    val position: Int = -1,
+)
 
 /** The guesses and opened videos of the last [KEEP_MS]. */
 data class GuessLog(
@@ -72,8 +103,17 @@ data class GuessLog(
         const val KEEP_MS = 30 * 24 * 60 * 60 * 1000L
         const val MAX_RECORDS = 500
 
-        /** Guesses made each time, the likeliest first. At most these many are fetched. */
+        /** Guesses made when the app opens, the likeliest first. At most these many are fetched. */
         const val GUESSES = 3
+
+        /**
+         * Guesses made at the other moments ([GuessMoment]), from one list, to begin with; for
+         * Up next and For you, then as deep as your taps in them go ([TapPositions.depth]).
+         */
+        const val MOMENT_GUESSES = 2
+
+        /** The most guesses made at once, and so the most ranks whose score decides what's fetched. */
+        const val MAX_GUESSES = 5
 
         /** How many of a rank's latest settled guesses decide whether it's fetched. */
         const val RECENT = 20
@@ -91,6 +131,9 @@ data class GuessLog(
 
 /** Settled: opened, or too old to be (a miss). */
 fun Guess.settled(now: Long): Boolean = used || now - at > GuessLog.WINDOW_MS
+
+/** The videos guessed in the last [GuessLog.WINDOW_MS] that haven't been opened: not guessed again meanwhile. */
+fun GuessLog.unsettledIds(now: Long): Set<String> = guesses.filter { !it.settled(now) }.mapTo(HashSet()) { it.videoId }
 
 // --- What to guess ---------------------------------------------------------------------
 
@@ -113,7 +156,7 @@ fun candidates(
     now: Long,
 ): List<Candidate> {
     val unfinished = history
-        .filter { !it.isWatched && it.fraction in 0.05f..0.9f && now - it.lastWatchedAt in 0..UNFINISHED_MS }
+        .filter { isUnfinished(it, now) }
         .sortedByDescending { it.lastWatchedAt }
         .map { it.video }
     val newest = feed.filterNot { it.isShort }.sortedByDescending { it.uploadedAtMs }
@@ -125,6 +168,39 @@ fun candidates(
         GuessReason.NextInLine to nextInLine(history, feed),
     ).flatMap { (reason, videos) -> videos.take(PER_SOURCE).mapIndexed { i, video -> Candidate(video, reason, i) } }
 }
+
+/** The top of the Up next list of the video you're watching. */
+fun upNextCandidates(upNext: List<VideoItem>): List<Candidate> =
+    upNext.take(PER_SOURCE).mapIndexed { i, v -> Candidate(v, GuessReason.UpNext, i) }
+
+/** The top of For you, as it loaded. */
+fun forYouCandidates(forYou: List<VideoItem>): List<Candidate> =
+    forYou.take(PER_SOURCE).mapIndexed { i, v -> Candidate(v, GuessReason.ForYou, i) }
+
+/**
+ * The video of the channel at [channelUrl] you're likely to open, having picked it in the
+ * Subscriptions list, likeliest first: one of its you started lately and didn't finish (where
+ * you left off), then the one after the last you finished, when you watch it in order
+ * ([nextInLine]), then its newest upload you haven't finished (not Shorts).
+ */
+fun channelCandidates(channelUrl: String, history: Collection<WatchEntry>, feed: List<VideoItem>, now: Long): List<Candidate> {
+    val own = feed.filter { it.channelUrl == channelUrl }
+    val finished = history.filter { it.isWatched }.mapNotNullTo(HashSet()) { videoIdOf(it.video.url) }
+    val unfinished = history
+        .filter { it.video.channelUrl == channelUrl && isUnfinished(it, now) }
+        .sortedByDescending { it.lastWatchedAt }
+        .map { Candidate(it.video, GuessReason.Unfinished, 0) }
+    val next = nextInLine(history, own).map { Candidate(it, GuessReason.NextInLine, 0) }
+    val newest = own.filterNot { it.isShort || videoIdOf(it.url) in finished }
+        .sortedByDescending { it.uploadedAtMs }
+        .take(1)
+        .map { Candidate(it, GuessReason.NewUpload, 0) }
+    return (unfinished + next + newest).distinctBy { videoIdOf(it.video.url) }
+}
+
+/** Started lately and between 5% and 90% of the way in. */
+private fun isUnfinished(e: WatchEntry, now: Long) =
+    !e.isWatched && e.fraction in 0.05f..0.9f && now - e.lastWatchedAt in 0..UNFINISHED_MS
 
 /**
  * For each channel in [feed] you're behind on, the video after the last one you finished:
@@ -158,7 +234,8 @@ fun nextInLine(history: Collection<WatchEntry>, feed: List<VideoItem>): List<Vid
 /**
  * The candidates, likeliest first, each video once and none you've finished: how likely
  * its channel is to be watched at this hour ([channelHabits]), times how often guesses of
- * its kind and of its channel have been opened, less the further down its list it is.
+ * its kind and of its channel have been opened, times how often you tap a video at its
+ * place in its list ([TapPositions]: the top, at first).
  */
 fun rankCandidates(
     candidates: List<Candidate>,
@@ -172,16 +249,94 @@ fun rankCandidates(
     val byReason = settled.groupBy { it.reason }
     val byChannel = settled.groupBy { it.channel }
     val finished = history.filter { it.isWatched }.mapNotNullTo(HashSet()) { videoIdOf(it.video.url) }
+    val taps = tapPositions(log.opens)
     return candidates
         .mapNotNull { c -> videoIdOf(c.video.url)?.let { id -> Triple(c, id, c.video.channelKey()) } }
         .filter { (_, id, _) -> id !in finished }
         .map { (c, id, channel) ->
-            val score = habits.of(channel) * openedRate(byReason[c.reason]) * openedRate(byChannel[channel]) / (1 + 0.5 * c.position)
+            val score = habits.of(channel) * openedRate(byReason[c.reason]) * openedRate(byChannel[channel]) *
+                taps.share(c.reason.list, c.position)
             Triple(c, id, score)
         }
         .sortedByDescending { it.third }
         .distinctBy { it.second }
         .map { it.first }
+}
+
+/** The list a kind of guess comes from, as you'd open from it; null for kinds that aren't the order of a list you see. */
+private val GuessReason.list: OpenSource?
+    get() = when (this) {
+        GuessReason.ForYou -> OpenSource.ForYou
+        GuessReason.UpNext -> OpenSource.UpNext
+        GuessReason.WatchLater -> OpenSource.WatchLater
+        GuessReason.NewUpload -> OpenSource.Subscriptions
+        GuessReason.Unfinished, GuessReason.NextInLine -> null
+    }
+
+// --- Where in a list you tap --------------------------------------------------------------
+
+/** Positions counted in a list: the first ten (0 at the top); a tap further down counts as the tenth. */
+private const val POSITIONS = 10
+
+/** How many taps' worth "the higher up, the likelier" counts for, before your own taps outweigh it. */
+private const val PRIOR_TAPS = 4.0
+
+/** Taps in a list before how deep they go decides how many to guess there. */
+private const val MIN_TAPS = 5
+
+/** Guess deep enough to cover this share of your taps in a list. */
+private const val COVER = 0.7
+
+/** "The higher up, the likelier", before there are taps to go on: a video halves in likeliness by the third place. */
+private val defaultShares: DoubleArray = DoubleArray(POSITIONS) { 1.0 / (1 + 0.5 * it) }.let { w -> DoubleArray(POSITIONS) { w[it] / w.sum() } }
+
+/**
+ * Where in each list you tap the video you open (by [OpenSource]), from the videos you opened
+ * lately whose place in their list was noted: how likely a tap is at each place, and so how
+ * many from the top to guess.
+ */
+class TapPositions internal constructor(private val counts: Map<OpenSource, IntArray>) {
+
+    /**
+     * How likely a tap at [position] in [source]'s list is (the shares of all places add up to
+     * 1): yours, blended with "the higher up, the likelier" while there are few. Null [source]:
+     * only the latter.
+     */
+    fun share(source: OpenSource?, position: Int): Double {
+        val p = position.coerceIn(0, POSITIONS - 1)
+        val c = source?.let { counts[it] } ?: return defaultShares[p]
+        return (c[p] + PRIOR_TAPS * defaultShares[p]) / (c.sum() + PRIOR_TAPS)
+    }
+
+    /**
+     * How many places from the top cover [COVER] of your taps in [source]'s list (1 when you
+     * nearly always take the first), or null before there are [MIN_TAPS] of them.
+     */
+    fun usual(source: OpenSource): Int? {
+        val c = counts[source] ?: return null
+        val n = c.sum()
+        if (n < MIN_TAPS) return null
+        var covered = 0
+        c.forEachIndexed { i, taps ->
+            covered += taps
+            if (covered >= COVER * n) return i + 1
+        }
+        return POSITIONS
+    }
+
+    /** How many to guess in [source]'s list: as deep as your taps there usually go, up to [max]; [default] before there are enough. */
+    fun depth(source: OpenSource, default: Int, max: Int = GuessLog.MAX_GUESSES): Int = usual(source)?.coerceIn(1, max) ?: default
+}
+
+/** Where in their lists the videos in [opens] were tapped (those noted). */
+fun tapPositions(opens: List<Opened>): TapPositions {
+    val counts = HashMap<OpenSource, IntArray>()
+    opens.forEach { o ->
+        val source = o.source ?: return@forEach
+        if (o.position < 0) return@forEach
+        counts.getOrPut(source) { IntArray(POSITIONS) }[o.position.coerceAtMost(POSITIONS - 1)]++
+    }
+    return TapPositions(counts)
 }
 
 /**
@@ -246,17 +401,18 @@ fun channelHabits(history: Collection<WatchEntry>, now: Long, zone: ZoneId = Zon
 }
 
 /**
- * How many of a round's guesses to fetch: the leading ranks whose latest settled guesses
- * (fetched or only noted: both are checked) were opened at least [GuessLog.FETCH_RATE] of
- * the time. Before a rank has [GuessLog.MIN_SETTLED] of them, only the first is fetched.
- * None while paused. So guessing wrong stops the fetching, and guessing right (guesses are
- * still made, and checked) starts it again.
+ * How many of a round's guesses at [moment] to fetch: the leading ranks whose latest settled
+ * guesses at that moment (fetched or only noted: both are checked) were opened at least
+ * [GuessLog.FETCH_RATE] of the time. Before a rank has [GuessLog.MIN_SETTLED] of them, only
+ * the first is fetched. None while paused. So guessing wrong stops the fetching, and guessing
+ * right (guesses are still made, and checked) starts it again, at each moment on its own.
  */
-fun fetchCount(log: GuessLog, now: Long): Int {
+fun fetchCount(log: GuessLog, now: Long, moment: GuessMoment = GuessMoment.AppOpen): Int {
     if (now < log.pausedUntil) return 0
     var count = 0
-    for (rank in 1..GuessLog.GUESSES) {
-        val recent = log.guesses.filter { it.rank == rank && it.settled(now) }.sortedByDescending { it.at }.take(GuessLog.RECENT)
+    val atMoment = log.guesses.filter { it.moment == moment }
+    for (rank in 1..GuessLog.MAX_GUESSES) {
+        val recent = atMoment.filter { it.rank == rank && it.settled(now) }.sortedByDescending { it.at }.take(GuessLog.RECENT)
         val fetch = if (recent.size < GuessLog.MIN_SETTLED) rank == 1
         else recent.count { it.used } >= GuessLog.FETCH_RATE * recent.size
         if (!fetch) break
@@ -274,17 +430,17 @@ fun GuessLog.notFetched(guess: Guess): GuessLog =
     copy(guesses = guesses.map { if (it.videoId == guess.videoId && it.at == guess.at) it.copy(fetched = false) else it })
 
 /**
- * [videoId] was opened: its guesses of the last [GuessLog.WINDOW_MS] were right, and it was
- * ready if one of them was fetched.
+ * [videoId] was opened (from [source], at [position] in its list): its guesses of the last
+ * [GuessLog.WINDOW_MS] were right, and it was ready if one of them was fetched.
  */
-fun GuessLog.opened(videoId: String, now: Long): GuessLog {
+fun GuessLog.opened(videoId: String, now: Long, source: OpenSource? = null, position: Int = -1): GuessLog {
     var ready = false
     val marked = guesses.map { g ->
         if (g.videoId != videoId || g.used || now - g.at !in 0..GuessLog.WINDOW_MS) return@map g
         if (g.fetched) ready = true
         g.copy(used = true)
     }
-    return copy(guesses = marked, opens = opens + Opened(videoId, now, ready)).trimmed(now)
+    return copy(guesses = marked, opens = opens + Opened(videoId, now, ready, source = source, position = position)).trimmed(now)
 }
 
 /** How long [videoId]'s details took when it was opened (lately). */
@@ -315,13 +471,26 @@ data class GuessStats(
     val byReason: List<ReasonScore>,
     /** How many it fetches now, each time the app opens. */
     val fetching: Int,
-    /** Its latest settled first guesses, fetched or not, and how many were opened: why it fetches none. */
+    /** Its latest settled first guesses when the app opens, fetched or not, and how many were opened: why it fetches none. */
     val recent: Int,
     val recentUsed: Int,
     val pausedUntil: Long,
+    /** The same, for each moment it guesses at that it has guessed at. */
+    val moments: List<MomentScore> = emptyList(),
+    /** The videos opened, and how many were ready, by where they were opened from (those recorded), the most first. */
+    val bySource: List<SourceReady> = emptyList(),
 )
 
 data class ReasonScore(val reason: GuessReason, val fetched: Int, val used: Int)
+
+/** At one [moment]: how many guesses it fetches now, and its latest settled first guesses and how many were opened. */
+data class MomentScore(val moment: GuessMoment, val fetching: Int, val recent: Int, val recentUsed: Int)
+
+/**
+ * Videos opened from one place, how many of them were ready, and how many places from the
+ * top of its list cover most of your taps there ([TapPositions.usual]; null before there are enough).
+ */
+data class SourceReady(val source: OpenSource, val opened: Int, val ready: Int, val usualDepth: Int? = null)
 
 fun guessStats(log: GuessLog, now: Long): GuessStats {
     val opens = log.opens.filter { now - it.at <= GuessLog.KEEP_MS }
@@ -330,7 +499,12 @@ fun guessStats(log: GuessLog, now: Long): GuessStats {
     val usual = if (waits.isEmpty()) GuessLog.TYPICAL_DETAILS_MS else waits[waits.size / 2]
     val saved = opens.filter { it.ready && it.detailsMs >= 0 }.sumOf { (usual - it.detailsMs).coerceAtLeast(0) }
     val settled = log.guesses.filter { it.fetched && it.settled(now) }
-    val recent = log.guesses.filter { it.rank == 1 && it.settled(now) }.sortedByDescending { it.at }.take(GuessLog.RECENT)
+    fun firstGuesses(moment: GuessMoment) = log.guesses
+        .filter { it.moment == moment && it.rank == 1 && it.settled(now) }.sortedByDescending { it.at }.take(GuessLog.RECENT)
+    val recent = firstGuesses(GuessMoment.AppOpen)
+    val moments = GuessMoment.entries
+        .filter { m -> m == GuessMoment.AppOpen || log.guesses.any { it.moment == m } }
+        .map { m -> firstGuesses(m).let { r -> MomentScore(m, fetchCount(log, now, m), r.size, r.count { it.used }) } }
     return GuessStats(
         opened = opens.size,
         ready = opens.count { it.ready },
@@ -344,6 +518,12 @@ fun guessStats(log: GuessLog, now: Long): GuessStats {
         recent = recent.size,
         recentUsed = recent.count { it.used },
         pausedUntil = log.pausedUntil,
+        moments = moments,
+        bySource = tapPositions(opens).let { taps ->
+            opens.filter { it.source != null }.groupBy { it.source!! }
+                .map { (source, o) -> SourceReady(source, o.size, o.count { it.ready }, taps.usual(source)) }
+        }
+            .sortedWith(compareByDescending<SourceReady> { it.opened }.thenBy { it.source.ordinal }),
     )
 }
 
@@ -356,7 +536,7 @@ internal fun GuessLog.toJson(): String = JSONObject()
             guesses.forEach { g ->
                 put(
                     JSONObject().put("id", g.videoId).put("at", g.at).put("reason", g.reason.name).put("channel", g.channel)
-                        .put("rank", g.rank).put("fetched", g.fetched).put("used", g.used),
+                        .put("rank", g.rank).put("fetched", g.fetched).put("used", g.used).put("moment", g.moment.name),
                 )
             }
         },
@@ -364,7 +544,12 @@ internal fun GuessLog.toJson(): String = JSONObject()
     .put(
         "opens",
         JSONArray().apply {
-            opens.forEach { o -> put(JSONObject().put("id", o.videoId).put("at", o.at).put("ready", o.ready).put("details", o.detailsMs)) }
+            opens.forEach { o ->
+                put(
+                    JSONObject().put("id", o.videoId).put("at", o.at).put("ready", o.ready).put("details", o.detailsMs)
+                        .put("source", o.source?.name ?: JSONObject.NULL).put("pos", o.position),
+                )
+            }
         },
     )
     .put("pausedUntil", pausedUntil)
@@ -387,13 +572,19 @@ internal fun guessLogFromJson(text: String): GuessLog {
                     rank = g.optInt("rank", 1),
                     fetched = g.optBoolean("fetched"),
                     used = g.optBoolean("used"),
+                    // Older records were all made when the app opened.
+                    moment = GuessMoment.entries.firstOrNull { it.name == g.optString("moment") } ?: GuessMoment.AppOpen,
                 )
             }.getOrNull()
         },
         opens = (0 until opens.length()).mapNotNull { i ->
             runCatching {
                 val p = opens.getJSONObject(i)
-                Opened(p.getString("id"), p.getLong("at"), p.optBoolean("ready"), p.optLong("details", -1))
+                Opened(
+                    p.getString("id"), p.getLong("at"), p.optBoolean("ready"), p.optLong("details", -1),
+                    source = if (p.isNull("source")) null else OpenSource.entries.firstOrNull { it.name == p.optString("source") },
+                    position = p.optInt("pos", -1),
+                )
             }.getOrNull()
         },
         pausedUntil = o.optLong("pausedUntil"),

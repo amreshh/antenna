@@ -7,6 +7,9 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import com.antenna.data.SeenUploads
 import com.antenna.data.channelsWithNewUploads
+import com.antenna.data.newActivityOrder
+import com.antenna.data.Prefetcher
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.Dispatchers
 import androidx.compose.runtime.produceState
@@ -83,25 +86,29 @@ import com.antenna.data.VideoItem
 import com.antenna.data.WatchHistoryStore
 import com.antenna.data.videoIdOf
 
+/** How long a channel stays picked before Prefetcher guesses its next video: not for channels passed through. */
+private const val CHANNEL_PICK_SETTLE_MS = 1_500L
+
 /** How the channel list next to the feed is ordered. */
 private enum class ChannelSort(val label: String) {
-    /** Newest upload first, like YouTube's "New activity". */
+    /** Channels with uploads you haven't seen first, then the rest; newest upload first, like YouTube's "New activity". */
     NewActivity("New activity"),
     Alphabetical("A–Z"),
 
-    /** Grouped by what they're about (ChannelTopics), the biggest group first. */
-    Topic("Topic"),
+    /** Grouped by YouTube's categories, like the Analytics card (ChannelTopics guesses them), the biggest group first. */
+    Categories("Categories"),
 }
 
 /**
  * The Subscriptions tab: newest uploads from every channel you follow. On big screens, the
- * channels are listed on the left (newest activity or A–Z); tapping one shows only its videos.
+ * channels are listed on the left (by new activity, A–Z or category); tapping one shows only
+ * its videos.
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun FeedTab(
     vm: FeedViewModel,
-    onOpenVideo: (String) -> Unit,
+    onOpenVideo: OpenVideo,
     onOpenChannel: (Channel) -> Unit,
     onManage: () -> Unit,
     modifier: Modifier = Modifier,
@@ -135,6 +142,23 @@ fun FeedTab(
     LaunchedEffect(selected, selectedIds) {
         if (selected != null && selectedIds != null) seenUploads.markSeen(selected, selectedIds)
     }
+    // A channel picked, and still picked a moment later (not passed through): you're likely to
+    // open one of its videos, so Prefetcher guesses which.
+    LaunchedEffect(selected) {
+        val channel = selected ?: return@LaunchedEffect
+        delay(CHANNEL_PICK_SETTLE_MS)
+        Prefetcher.get(context).onChannelPicked(channel, state.items)
+    }
+    /**
+     * The channel picked while it had new uploads: in the New activity order it stays with the
+     * new ones while it's open, so it doesn't drop away under your finger, and goes down with
+     * the ones you've seen when you pick another.
+     */
+    var keptNew by rememberSaveable { mutableStateOf<String?>(null) }
+    val onSelect = { url: String? ->
+        keptNew = url?.takeIf { it in withNew }
+        picked = url
+    }
 
     val visible = remember(state.items, watched, hideWatched, selected, channels) {
         // The feed doesn't come with avatars, but the subscriptions mostly have them.
@@ -156,17 +180,17 @@ fun FeedTab(
             modifier = m,
         )
     }
-    // The watched videos that have a category, for the Topic order: it changes only when one
-    // is added, not with every position saved while a video plays.
+    // The watched videos that have a category, for the Categories order: it changes only when
+    // one is added, not with every position saved while a video plays.
     val categorized by remember(history) {
         history.entries.map { entries -> entries.values.filter { it.category != null } }
             .distinctUntilChanged { a, b -> a.size == b.size && a.mapTo(HashSet()) { it.video.url } == b.mapTo(HashSet()) { it.video.url } }
     }.collectAsStateWithLifecycle(initialValue = emptyList())
     val topics by produceState<Map<String, String>?>(null, sort, channels, state.items, categorized) {
-        value = if (sort != ChannelSort.Topic) null
+        value = if (sort != ChannelSort.Categories) null
         else withContext(Dispatchers.Default) { ChannelTopics.of(channels, state.items, categorized) }
     }
-    /** For the Topic order: (topic, its channels A–Z), the biggest group first and Other last. */
+    /** For the Categories order: (category, its channels A–Z), the biggest group first and Other last. */
     val groups = remember(topics, channels) {
         topics?.let { t ->
             channels.groupBy { t[it.url] ?: ChannelTopics.OTHER }.entries
@@ -174,18 +198,11 @@ fun FeedTab(
                 .map { (topic, list) -> topic to list.sortedBy { it.name.lowercase() } }
         }
     }
-    val sortedChannels = remember(channels, state.items, sort, groups) {
+    val sortedChannels = remember(channels, state.items, sort, groups, withNew, keptNew) {
         when (sort) {
-            ChannelSort.Topic -> groups?.flatMap { it.second } ?: channels.sortedBy { it.name.lowercase() }
+            ChannelSort.Categories -> groups?.flatMap { it.second } ?: channels.sortedBy { it.name.lowercase() }
             ChannelSort.Alphabetical -> channels.sortedBy { it.name.lowercase() }
-            ChannelSort.NewActivity -> {
-                val newest = HashMap<String, Long>()
-                state.items.forEach { v ->
-                    val url = v.channelUrl ?: return@forEach
-                    if (v.uploadedAtMs > (newest[url] ?: 0L)) newest[url] = v.uploadedAtMs
-                }
-                channels.sortedWith(compareByDescending<Channel> { newest[it.url] ?: 0L }.thenBy { it.name.lowercase() })
-            }
+            ChannelSort.NewActivity -> newActivityOrder(channels, state.items, keptNew?.let { withNew + it } ?: withNew)
         }
     }
 
@@ -213,11 +230,11 @@ fun FeedTab(
         Row(modifier) {
             ChannelList(
                 sortedChannels,
-                groups = groups.takeIf { sort == ChannelSort.Topic },
+                groups = groups.takeIf { sort == ChannelSort.Categories },
                 sort = sort,
                 onSort = { sort = it },
                 selected = selected,
-                onSelect = { picked = it },
+                onSelect = onSelect,
                 withNew = withNew,
                 modifier = Modifier.width(280.dp).fillMaxHeight(),
             )
@@ -235,7 +252,7 @@ fun FeedTab(
 @Composable
 private fun ChannelList(
     channels: List<Channel>,
-    /** The Topic order's groups: shown under their topic's heading. */
+    /** The Categories order's groups: shown under their category's heading. */
     groups: List<Pair<String, List<Channel>>>?,
     sort: ChannelSort,
     onSort: (ChannelSort) -> Unit,
@@ -279,11 +296,12 @@ private fun ChannelList(
                 }
             }
             @Composable
-            fun Entry(channel: Channel) = ChannelEntry(
+            fun Entry(channel: Channel, modifier: Modifier) = ChannelEntry(
                 name = channel.name,
                 selected = selected == channel.url,
                 onClick = { onSelect(channel.url) },
                 newUploads = channel.url in withNew,
+                modifier = modifier,
             ) {
                 ChannelAvatar(channel.avatarUrl, Modifier.size(32.dp))
             }
@@ -297,10 +315,11 @@ private fun ChannelList(
                             modifier = Modifier.padding(start = 12.dp, top = 16.dp, bottom = 4.dp),
                         )
                     }
-                    items(list, key = { it.url }) { Entry(it) }
+                    items(list, key = { it.url }) { Entry(it, Modifier.animateItem()) }
                 }
             } else {
-                items(channels, key = { it.url }) { Entry(it) }
+                // Sliding to their new places when the order changes (a channel's uploads seen).
+                items(channels, key = { it.url }) { Entry(it, Modifier.animateItem()) }
             }
         }
     }
@@ -311,12 +330,13 @@ private fun ChannelEntry(
     name: String,
     selected: Boolean,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     newUploads: Boolean = false,
     icon: @Composable () -> Unit,
 ) {
     val background = if (selected) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.background
     Row(
-        Modifier
+        modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(28.dp))
             .background(if (selected) background else Color.Transparent)
@@ -369,7 +389,7 @@ private fun FeedGrid(
     showShorts: Boolean,
     onShowShorts: (Boolean) -> Unit,
     onRefresh: () -> Unit,
-    onOpenVideo: (String) -> Unit,
+    onOpenVideo: OpenVideo,
     onOpenChannel: (Channel) -> Unit,
     onVideoShown: (VideoItem) -> Unit,
     modifier: Modifier,
@@ -383,12 +403,17 @@ private fun FeedGrid(
             if (showShorts) {
                 ShortsGrid(Modifier.weight(1f)) {
                     feedStatus(state, inset = 0.dp)
-                    shortItems(shorts, onClick = { onOpenVideo(it.url) })
+                    shortItems(shorts, onClick = { onOpenVideo(it.url, -1) }) // a grid of its own: not counted with the list's places
                 }
             } else {
                 VideoGrid(Modifier.weight(1f)) { wide ->
                     feedStatus(state, inset = if (wide) 0.dp else 16.dp)
-                    videoItems(videos, wide, onClick = { onOpenVideo(it.url) }, onChannelClick = onOpenChannel, onShown = onVideoShown)
+                    videoItems(
+                        videos, wide,
+                        onClick = { onOpenVideo(it.url, positionOf(videos, it)) },
+                        onChannelClick = onOpenChannel,
+                        onShown = onVideoShown,
+                    )
                 }
             }
         }

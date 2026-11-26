@@ -1,6 +1,7 @@
 package com.antenna.data
 
 import com.antenna.data.TestData.NOW
+import com.antenna.data.TestData.channelUrl
 import com.antenna.data.TestData.video
 import com.antenna.data.TestData.watched
 import org.junit.Assert.assertTrue
@@ -22,11 +23,25 @@ class RecommenderPerformanceTest {
         }
         val history = entries.associateBy { videoIdOf(it.video.url)!! }
         val uploads = (1..64).map { video(50_000 + it, channel = "c${it % 8}", uploadedAtMs = NOW - it * 3_600_000L) }
+        // A year of the watch log for a heavy viewer, a long Not interested list, and a month of
+        // what For you showed.
+        val spans = (1..5_500).map { n ->
+            WatchSpan(TestData.id(n % 1000 + 1), channelUrl("c${n % 60}"), NOW - n * 1_500_000L, 0, 30_000L * (n % 12), OpenSource.ForYou)
+        }
+        val feedback = ForYouFeedback(
+            notInterested = (1..500).associate { n -> TestData.id(10_000 + n * 7) to NotInterested(TestData.id(10_000 + n * 7), channelUrl("c${n % 40}"), "c${n % 40}", NOW) },
+            hiddenChannels = (1..20).map { HiddenChannel(channelUrl("h$it"), "h$it", NOW) },
+        )
+        val shown = (1..3_000).associate { TestData.id(10_000 + it) to it % 5 }
+        fun run(seed: Long) = Recommender.build(
+            history, emptySet(), seed, uploads, NOW,
+            outcomes = Recommender.outcomes(history, spans, NOW), feedback = feedback, shown = shown,
+        )
 
-        repeat(3) { Recommender.build(history, emptySet(), it.toLong(), uploads, NOW) } // warm up the JIT
+        repeat(3) { run(it.toLong()) } // warm up the JIT
         val runs = 10
         val start = System.nanoTime()
-        repeat(runs) { Recommender.build(history, emptySet(), it.toLong(), uploads, NOW) }
+        repeat(runs) { run(it.toLong()) }
         val averageMs = (System.nanoTime() - start) / 1e6 / runs
 
         println("Recommender.build with a full history: %.1f ms on average".format(averageMs))
