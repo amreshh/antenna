@@ -27,8 +27,13 @@ name: ci
 #   plan ─┬─ test ─────────┐
 #         ├─ lint ─────────┤
 #         ├─ deps ─────────┤
-#         └─ build ─ smoke ┼─ checks ─┬─ report (pull requests)
-#   workflows ─────────────┘          └─ sign ─ release (main, tags)
+#         ├─ build ─ smoke ┼─ checks ─┬─ report (pull requests)
+#         └─ cache (main)  │          └─ sign ─ release (main, tags)
+#   workflows ─────────────┘
+#
+# smoke also waits for test, lint, deps and workflows, and doesn't start when
+# one failed: nothing that failed can be merged, and the emulator is the slowest
+# part. (They finish before build does, so it starts no later.)
 #
 # Version: merging into main bumps the patch of the latest vX.Y.Z tag; "#minor"
 # or "#major" in the pull request's title or in a commit message bumps that
@@ -54,9 +59,10 @@ name: ci
 #   ANDROID_KEY_PASSWORD
 # A release without them fails rather than ship an APK signed with a throwaway key.
 #
-# Caches: only runs on main save the Gradle cache (CodeQL's, and the build job's
-# when main builds the APK itself); pull requests and tags only restore it, so
-# nothing a pull request does reaches it.
+# Caches: only the cache job saves Gradle's cache, on main after a merge. It runs
+# everything pull requests run, so its entry has all they need; every other job
+# (here, CodeQL's and the weekly dependency scan) only restores it, so nothing a
+# pull request does reaches it.
 on:
   push:
     # main only: a merged pull request, to release. Pushes to dev are work in
@@ -303,8 +309,9 @@ jobs:
 
       # Gradle's downloads, restored from main's cache, and a check that
       # gradle/wrapper/gradle-wrapper.jar is a genuine Gradle release. zizmor's
-      # cache-poisoning warning doesn't apply: only runs on main save this cache,
-      # so nothing from a pull request reaches anything that's released.
+      # cache-poisoning warning doesn't apply: only the cache job saves this
+      # cache, on main, so nothing from a pull request reaches anything that's
+      # released.
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
 
       - name: Unit tests
@@ -538,8 +545,13 @@ jobs:
           distribution: temurin
           java-version: 25
 
-      # Restores main's cache only; see the test job.
+      # Restores main's cache only; see the test job. Read-only on main too: an
+      # entry of its own would be what later pull requests' build jobs restore
+      # (setup-gradle prefers the same job's), and it lacks what the tests and
+      # lint need, then goes stale.
       - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
+        with:
+          cache-read-only: true
 
       # Signed with Gradle's throwaway debug key: installable to try out, and
       # signed with the release key when it's released (the sign job).
@@ -614,10 +626,12 @@ jobs:
   # starts, the home screen shows, the player loads a video and minimizes,
   # search finds videos and opens a channel, nothing crashes; and cold start and
   # memory stay within their budgets.
-  # Everywhere the APK is built.
+  # Everywhere the APK is built, unless another check failed (see the top).
   smoke:
-    needs: [plan, build]
-    if: needs.build.result == 'success'
+    needs: [plan, build, test, lint, workflows, deps]
+    if: >-
+      ${{ !cancelled() && needs.build.result == 'success'
+      && !contains(needs.*.result, 'failure') && !contains(needs.*.result, 'cancelled') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
@@ -676,6 +690,42 @@ jobs:
           path: ${{ runner.temp }}/smoke-screenshots
           if-no-files-found: ignore
           retention-days: 7
+
+  # main, after a merge: everything pull requests run, to save Gradle's
+  # downloads for them. It's the only job that saves Gradle's cache: before it,
+  # the cache was CodeQL's, which only compiles, so each pull request downloaded
+  # what the tests and lint need from Maven Central (which sometimes answers
+  # 429 Too Many Requests), and build restored a stale entry of its own. Not a
+  # check: if it fails, the release still goes out and pull requests download
+  # what's missing.
+  cache:
+    needs: plan
+    if: github.ref == 'refs/heads/main' && needs.plan.outputs.release == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    continue-on-error: true
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: 25
+
+      # Saves the cache at the end (setup-gradle's default on main). From main's
+      # own code only; see the test job.
+      - uses: gradle/actions/setup-gradle@8da46b539cd8fe6ab27ca75128919a18d757604c # zizmor: ignore[cache-poisoning] v6.4.1
+
+      # What test, lint, deps and build run. --continue: a failure doesn't stop
+      # the rest from downloading what it needs.
+      - name: Everything pull requests run
+        run: |
+          ./gradlew --continue testDebugUnitTest createDebugUnitTestCoverageReport lintDebug assembleRelease
+          ./gradlew -q :app:dependencies --configuration releaseRuntimeClasspath > /dev/null
 
   # The one check to require in branch rules: fails when any check failed or
   # was cancelled. (A skipped job counts as passed, so requiring build alone
