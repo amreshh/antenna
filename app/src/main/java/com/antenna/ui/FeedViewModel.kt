@@ -3,9 +3,11 @@ package com.antenna.ui
 import androidx.core.content.edit
 import android.content.Context
 import android.util.Log
+import com.antenna.data.VideosPage
 import com.antenna.data.lengths
 import com.antenna.data.videoIdOf
 import com.antenna.data.withLengths
+import org.schabi.newpipe.extractor.Page
 import kotlinx.coroutines.delay
 import java.util.concurrent.atomic.AtomicBoolean
 import org.schabi.newpipe.extractor.exceptions.ReCaptchaException
@@ -49,6 +51,41 @@ data class FeedUiState(
     val error: String? = null,
 )
 
+/**
+ * A channel's Videos tab, as far as it's loaded: further back than its videos in the feed,
+ * whose RSS has only its last 15 uploads, Shorts among them. The channel picked in the
+ * Subscriptions tab loads more of it as you scroll; the first page also gives the lengths of
+ * the channel's videos in the feed.
+ */
+data class ChannelVideos(
+    /** Newest first. */
+    val videos: List<VideoItem> = emptyList(),
+    /** The page after [videos]: null at the end, and before the first page has loaded ([loaded]). */
+    val next: Page? = null,
+    val loaded: Boolean = false,
+    val loading: Boolean = false,
+    /** Why the last page didn't load. */
+    val error: String? = null,
+) {
+    /** There's more of the tab to load: its first page, or the one after. */
+    val hasMore: Boolean get() = !loaded || next != null
+
+    /**
+     * With [page] loaded: after the videos so far, or, the first page loaded again ([first]:
+     * for the lengths of new uploads), in front of them, still going as far back. A page that
+     * adds nothing is taken as the end, so a list that keeps coming back the same can't keep
+     * loading.
+     */
+    fun plus(page: VideosPage, first: Boolean): ChannelVideos = when {
+        !loaded -> copy(videos = page.videos, next = page.next, loaded = true)
+        first -> copy(videos = (page.videos + videos).distinctBy { it.url })
+        else -> {
+            val more = (videos + page.videos).distinctBy { it.url }
+            copy(videos = more, next = page.next.takeIf { more.size > videos.size })
+        }
+    }
+}
+
 /** A subscriptions.csv is about 100 bytes per channel. */
 private const val MAX_IMPORT_BYTES = 5 * 1024 * 1024
 
@@ -91,10 +128,12 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
 
     /** Videos whose length was looked for, found or not, by id (lengthWanted). */
     private val lengthsLookedFor = HashSet<String>()
-
-    /** Channels whose video lengths are being fetched, by url. */
-    private val fetchingLengths = HashSet<String>()
     private val lengthsGate = Semaphore(LENGTH_REQUESTS)
+
+    private val _channelVideos = MutableStateFlow<Map<String, ChannelVideos>>(emptyMap())
+
+    /** Channels' Videos tabs as far as they're loaded, by channel url (loadMoreVideos, lengthWanted). */
+    val channelVideos: StateFlow<Map<String, ChannelVideos>> = _channelVideos.asStateFlow()
 
     /** YouTube is limiting requests: no more lengths until the app starts again. */
     private var lengthsLimited = false
@@ -134,38 +173,66 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     fun unsubscribe(channel: Channel) = store.unsubscribe(channel.url)
 
     /**
-     * [video] is on screen without its length: the RSS feed doesn't have them. Fetches its
-     * channel's (FeedRepository.lengths), which fills in all of that channel's videos in the
-     * feed at once, and saves them with the feed, which keeps them when it's loaded again. So
-     * a channel is asked again only when it has a new upload, or the app has started again
-     * since one wasn't found (a live stream: those aren't among its videos). Shorts are left
-     * out: YouTube shows no length for them.
+     * [video] is on screen without its length: the RSS feed doesn't have them. Loads the first
+     * page of its channel's Videos tab (loadVideos), which fills in all of that channel's
+     * videos in the feed at once, and saves them with the feed, which keeps them when it's
+     * loaded again. So a channel is asked again only when it has a new upload, or the app has
+     * started again since one wasn't found (a live stream: those aren't among its videos).
+     * Shorts are left out: YouTube shows no length for them.
      */
     fun lengthWanted(video: VideoItem) {
         if (video.durationSeconds > 0 || video.isShort || lengthsLimited) return
         val channel = video.channelUrl ?: return
         val id = videoIdOf(video.url) ?: return
-        if (id in lengthsLookedFor || !fetchingLengths.add(channel)) return
+        if (id in lengthsLookedFor || _channelVideos.value[channel]?.loading == true) return
+        loadVideos(channel, page = null, gated = true)
+    }
+
+    /**
+     * The channel at [channelUrl] is picked, and the end of its videos is on screen: loads
+     * more of them from its Videos tab, its first page or the next one.
+     */
+    fun loadMoreVideos(channelUrl: String) {
+        val was = _channelVideos.value[channelUrl] ?: ChannelVideos()
+        if (!was.loading && was.hasMore) loadVideos(channelUrl, was.next)
+    }
+
+    /**
+     * Loads a page of [channelUrl]'s Videos tab, [page] or (null) the first, into
+     * [channelVideos]. The first page's lengths fill in the channel's videos in the feed, and
+     * are saved with it; found or not, those videos' lengths aren't looked for again (until the
+     * app starts again). [gated]: one of the lengths fetched [LENGTH_REQUESTS] at a time.
+     */
+    private fun loadVideos(channelUrl: String, page: Page?, gated: Boolean = false) {
+        val channel = store.channels.value.firstOrNull { it.url == channelUrl } ?: return
+        updateVideos(channelUrl) { it.copy(loading = true, error = null) }
         viewModelScope.launch {
             try {
-                val found = lengthsGate.withPermit { FeedRepository.lengths(channel) }
+                val got = if (gated) lengthsGate.withPermit { FeedRepository.videos(channel, page) }
+                else FeedRepository.videos(channel, page)
+                updateVideos(channelUrl) { it.plus(got, first = page == null).copy(loading = false) }
+                val found = if (page == null) got.videos.lengths() else emptyMap()
                 if (found.isNotEmpty()) {
                     _state.update { it.copy(items = it.items.withLengths(found)) }
                     save(after = LENGTHS_SAVE_DELAY_MS)
                 }
             } catch (e: CancellationException) {
                 throw e
-            } catch (_: ReCaptchaException) {
-                lengthsLimited = true
             } catch (e: Exception) {
-                Log.i("Feed", "No video lengths for $channel", e)
+                if (e is ReCaptchaException) lengthsLimited = true
+                Log.i("Feed", "Videos of ${channel.name} didn't load", e)
+                // Said only when they were asked for: lengths looked for unseen are tried again on scrolling there.
+                updateVideos(channelUrl) { it.copy(loading = false, error = e.readable().takeUnless { gated }) }
             } finally {
-                // Found or not, this channel's videos aren't looked for again (until the app starts again).
-                _state.value.items.forEach { v -> if (v.channelUrl == channel) videoIdOf(v.url)?.let(lengthsLookedFor::add) }
-                fetchingLengths.remove(channel)
+                if (page == null) {
+                    _state.value.items.forEach { v -> if (v.channelUrl == channelUrl) videoIdOf(v.url)?.let(lengthsLookedFor::add) }
+                }
             }
         }
     }
+
+    private fun updateVideos(channelUrl: String, change: (ChannelVideos) -> ChannelVideos) =
+        _channelVideos.update { it + (channelUrl to change(it[channelUrl] ?: ChannelVideos())) }
 
     /**
      * Saves the feed as it is then, [after] a while. A save still waiting is replaced, so the
@@ -241,6 +308,7 @@ class FeedViewModel(app: Application) : AndroidViewModel(app) {
     /** Drops removed channels locally and fetches only newly added ones. */
     private fun sync(list: List<Channel>) {
         val current = list.map { it.url }.toSet()
+        _channelVideos.update { m -> m.filterKeys { it in current } }
         if (current == loaded || _state.value.refreshing) return
         val removed = loaded - current
         if (removed.isNotEmpty()) {

@@ -12,10 +12,13 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.materialIcon
 import androidx.compose.material.icons.materialPath
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.TextButton
+import androidx.compose.ui.unit.Dp
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.graphics.SolidColor
@@ -121,6 +124,32 @@ internal fun VideoGrid(modifier: Modifier = Modifier, content: LazyGridScope.(wi
 /** Headers, errors and spinners take up the whole width of the grid. */
 internal fun LazyGridScope.fullWidthItem(key: Any? = null, content: @Composable () -> Unit) =
     item(key = key, span = { GridItemSpan(maxLineSpan) }) { content() }
+
+/**
+ * The end of a list that grows as you scroll, like YouTube's: a spinner, which asks for more
+ * ([onLoadMore]) when it comes on screen, or why the last ones didn't come ([error]), to try
+ * again. [loaded], how many the list has, asks again when it changes with this on screen.
+ */
+internal fun LazyGridScope.loadMoreItem(loading: Boolean, error: String?, loaded: Int, onLoadMore: () -> Unit, inset: Dp) =
+    fullWidthItem(key = "load_more") {
+        if (error != null && !loading) {
+            Row(Modifier.padding(horizontal = inset, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    "Couldn't load more: $error",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.error,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                TextButton(onClick = onLoadMore) { Text("Try again") }
+            }
+        } else {
+            // Back on screen after the last ones came (or none were loading): the next ones.
+            if (!loading) LaunchedEffect(loaded) { onLoadMore() }
+            Box(Modifier.fillMaxWidth().padding(16.dp), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(Modifier.size(28.dp), strokeWidth = 3.dp)
+            }
+        }
+    }
 
 /**
  * With [onChannelClick], each video shows its channel's avatar (when its channel is known),

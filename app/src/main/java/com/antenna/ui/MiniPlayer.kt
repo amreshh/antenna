@@ -1,7 +1,19 @@
 package com.antenna.ui
 
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculateCentroidSize
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.foundation.layout.size
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.ui.geometry.Rect
+import androidx.compose.ui.input.pointer.PointerIcon
+import androidx.compose.ui.input.pointer.pointerHoverIcon
+import androidx.compose.ui.input.pointer.positionChanged
+import androidx.compose.ui.platform.LocalContext
+import com.antenna.data.MiniPlayerPlace
+import com.antenna.data.Prefs
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.geometry.Offset
 import com.antenna.sponsorblock.Segment
@@ -76,14 +88,146 @@ import kotlin.math.sign
 internal val MiniPlayerHeight = 64.dp
 
 /**
- * On big screens ([isWideWindow]) the minimized player is a floating video card in the
- * bottom corner instead of a bar: about a third of the window wide, within these bounds.
+ * On big screens ([isWideWindow]) the minimized player is a floating video card instead of a
+ * bar: in the bottom corner, about a third of the window wide within these bounds, until it's
+ * moved or resized ([FloatingMini]).
  */
 internal val FloatingMiniMinWidth = 240.dp
 internal val FloatingMiniMaxWidth = 360.dp
 internal val FloatingMiniMargin = 12.dp
 internal val FloatingMiniCorner = 12.dp
 internal val FloatingMiniElevation = 8.dp
+
+/** The smallest the floating mini player can be made. */
+internal val FloatingMiniSmallest = 160.dp
+
+/** How close to one of the floating mini player's bottom corners a drag resizes it instead of moving it. */
+internal val FloatingMiniGrip = 28.dp
+
+/**
+ * Where the floating mini player is, and how big. Drag it to move it anywhere above the tabs'
+ * navigation bar; pinch it, or drag one of its bottom corners, to resize it. Its place is kept
+ * as fractions of the room it can move in ([MiniPlayerPlace]), and [onSave] keeps it for next
+ * time when a move ends.
+ */
+@Stable
+internal class FloatingMini(start: MiniPlayerPlace, private val onSave: (MiniPlayerPlace) -> Unit) {
+    private var x by mutableFloatStateOf(start.x.coerceIn(0f, 1f))
+    private var y by mutableFloatStateOf(start.y.coerceIn(0f, 1f))
+
+    /** 0 until it's resized. */
+    private var widthDp by mutableFloatStateOf(start.widthDp)
+
+    // As the last layout had them: the room it can move in, its usual width, the density.
+    private var room = Rect.Zero
+    private var usualWidth = 0f
+    private var density = 1f
+
+    /**
+     * Where it is, in the window's pixels: in [room], and [usualWidth] wide until it's resized.
+     * Read while laying out, so moving it lays it out again without recomposing anything.
+     */
+    fun place(room: Rect, usualWidth: Float, density: Float): Rect {
+        this.room = room
+        this.usualWidth = usualWidth
+        this.density = density
+        return card()
+    }
+
+    /** Moved by [pan], and scaled by [zoom] around [pivot] (a point on it, from its top left): a drag, or a pinch. */
+    fun transform(pan: Offset, zoom: Float = 1f, pivot: Offset = Offset.Zero) {
+        val card = card()
+        val width = (card.width * zoom).coerceIn(widths())
+        val scale = width / card.width
+        // The point between the fingers stays under them while it grows or shrinks.
+        moveTo(card.left + pivot.x * (1 - scale) + pan.x, card.top + pivot.y * (1 - scale) + pan.y, width, resized = zoom != 1f)
+    }
+
+    /**
+     * Resized by dragging one of its bottom corners by [drag] ([fromLeft]: the left one), by as
+     * much as the drag goes along its diagonal. The opposite corner stays put, unless that would
+     * take the card out of its room.
+     */
+    fun resize(drag: Offset, fromLeft: Boolean) {
+        val card = card()
+        // How far the corner went outwards along the 16:9 diagonal, in width: (±16, 9)·drag × 16 / (16² + 9²)
+        val wider = ((if (fromLeft) -drag.x else drag.x) * 16 + drag.y * 9) * 16 / 337
+        val width = (card.width + wider).coerceIn(widths())
+        moveTo(if (fromLeft) card.right - width else card.left, card.top, width, resized = true)
+    }
+
+    /** A move ended: kept for next time. */
+    fun save() = onSave(MiniPlayerPlace(x, y, widthDp))
+
+    /** From the smallest it can be made to as big as its room. */
+    private fun widths(): ClosedFloatingPointRange<Float> {
+        val most = minOf(room.width, room.height * 16 / 9).coerceAtLeast(1f)
+        return (FloatingMiniSmallest.value * density).coerceAtMost(most)..most
+    }
+
+    private fun card(): Rect {
+        val width = (if (widthDp > 0) widthDp * density else usualWidth).coerceIn(widths())
+        val height = width * 9 / 16
+        val left = room.left + (room.width - width).coerceAtLeast(0f) * x
+        val top = room.top + (room.height - height).coerceAtLeast(0f) * y
+        return Rect(left, top, left + width, top + height)
+    }
+
+    private fun moveTo(left: Float, top: Float, width: Float, resized: Boolean) {
+        val freeX = room.width - width
+        val freeY = room.height - width * 9 / 16
+        if (freeX > 0) x = ((left - room.left) / freeX).coerceIn(0f, 1f)
+        if (freeY > 0) y = ((top - room.top) / freeY).coerceIn(0f, 1f)
+        if (resized) widthDp = width / density
+    }
+}
+
+@Composable
+internal fun rememberFloatingMini(): FloatingMini {
+    val context = LocalContext.current
+    return remember(context) {
+        val prefs = Prefs(context)
+        FloatingMini(prefs.miniPlayer) { prefs.miniPlayer = it }
+    }
+}
+
+/**
+ * Moving and resizing the floating mini player ([mini]) while it's all the way down ([sheet]):
+ * a drag moves it, one from a bottom corner ([FloatingMiniGrip]) resizes it, and a pinch does
+ * both. It sees touches before what's inside, and takes them only once they've moved: taps
+ * still open the player, and press its buttons.
+ */
+internal fun Modifier.moveAndResize(mini: FloatingMini, sheet: SheetState): Modifier =
+    pointerInput(mini, sheet) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
+            if (sheet.progress != 1f) return@awaitEachGesture
+            val grip = FloatingMiniGrip.toPx()
+            val fromCorner = down.position.y > size.height - grip && (down.position.x < grip || down.position.x > size.width - grip)
+            val fromLeft = down.position.x < size.width / 2f
+            val slop = viewConfiguration.touchSlop
+            var moving = false
+            // Until it's moving, what the fingers did adds up, so it then catches up with them.
+            var pan = Offset.Zero
+            var zoom = 1f
+            while (true) {
+                val event = awaitPointerEvent(PointerEventPass.Initial)
+                if (event.changes.none { it.pressed }) break
+                pan += event.calculatePan()
+                zoom *= event.calculateZoom()
+                if (!moving) {
+                    moving = pan.getDistance() > slop || abs(1 - zoom) * event.calculateCentroidSize() > slop
+                    if (!moving) continue
+                }
+                if (fromCorner && event.changes.count { it.pressed } == 1) mini.resize(pan, fromLeft)
+                else mini.transform(pan, zoom, pivot = event.calculateCentroid())
+                pan = Offset.Zero
+                zoom = 1f
+                event.changes.forEach { if (it.positionChanged()) it.consume() } // not a tap for what's inside
+            }
+            if (moving) mini.save()
+        }
+    }
 
 /**
  * Where the minimized player docks. Each screen puts a [MiniPlayerSlot] where it should go
@@ -132,6 +276,9 @@ internal class SheetState(private val scope: CoroutineScope, private val flingVe
     /** Off in fullscreen. */
     var draggable = true
 
+    /** Minimized, it drags up to full size: not the floating mini player, which a drag moves ([moveAndResize]). */
+    var expandsByDrag = true
+
     /** Called when a drag ends, with where the sheet is going: true for full size. */
     var onSettle: (expanded: Boolean) -> Unit = {}
 
@@ -142,10 +289,10 @@ internal class SheetState(private val scope: CoroutineScope, private val flingVe
     /** Where the sheet was when the drag started: the end it's being dragged away from. */
     private var dragFrom = target
 
-    /** Full size only drags down, minimized only up. */
+    /** Full size only drags down, minimized only up ([expandsByDrag]). */
     fun canDrag(dy: Float): Boolean = when (progress) {
         0f -> dy > 0
-        1f -> dy < 0
+        1f -> dy < 0 && expandsByDrag
         else -> true
     }
 
@@ -296,7 +443,8 @@ internal fun MiniControls(
 
 /**
  * The floating mini player's buttons (big screens), over its video: play/pause in the top
- * left corner, close in the top right. Tapping anywhere else brings the player back.
+ * left corner, close in the top right. Tapping anywhere else brings the player back. A mouse
+ * over a bottom corner gets a resize arrow: dragging from there resizes it ([moveAndResize]).
  */
 @Composable
 internal fun MiniOverlay(
@@ -325,8 +473,13 @@ internal fun MiniOverlay(
                 Icon(Icons.Default.Close, contentDescription = "Close the player")
             }
         }
+        Box(Modifier.align(Alignment.BottomStart).size(FloatingMiniGrip).pointerHoverIcon(ResizeFromBottomLeft))
+        Box(Modifier.align(Alignment.BottomEnd).size(FloatingMiniGrip).pointerHoverIcon(ResizeFromBottomRight))
     }
 }
+
+private val ResizeFromBottomLeft = PointerIcon(android.view.PointerIcon.TYPE_TOP_RIGHT_DIAGONAL_DOUBLE_ARROW)
+private val ResizeFromBottomRight = PointerIcon(android.view.PointerIcon.TYPE_TOP_LEFT_DIAGONAL_DOUBLE_ARROW)
 
 /** How thick the progress line along the bottom of the full-size video is. */
 internal val ProgressLineHeight = 3.dp

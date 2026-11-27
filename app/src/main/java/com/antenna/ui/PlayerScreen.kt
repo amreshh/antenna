@@ -2,6 +2,7 @@ package com.antenna.ui
 
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.IntOffset
+import androidx.compose.ui.geometry.Rect
 import androidx.compose.ui.unit.IntRect
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.LayoutDirection
@@ -154,9 +155,9 @@ sealed interface PlayerUiState {
 /**
  * The player, drawn over the tabs. Full size it covers the screen; swiped down (or with
  * Back) it shrinks into the mini player above the tabs' navigation bar, where the video
- * keeps playing while you browse. Tap it or swipe it up to bring it back. On phones the mini
- * player is a bar across the screen; on big screens ([isWideWindow]) a floating video card
- * in the bottom corner, over the tabs.
+ * keeps playing while you browse. Tap it to bring it back. On phones the mini player is a bar
+ * across the screen, which also swipes up; on big screens ([isWideWindow]) a floating video
+ * card over the tabs, which you can drag anywhere and resize ([FloatingMini]).
  *
  * Everything in between is one layout driven by [SheetState.progress] (0 = full size,
  * 1 = minimized): the video shrinks from the full width to the mini player's video, the
@@ -218,6 +219,9 @@ internal fun PlayerSheet(
 
     val wide = isExpandedWindow()
     val floating = isWideWindow()
+    // Minimized on a big screen, it's a card you move and resize, and tap to bring back.
+    val mini = rememberFloatingMini()
+    sheet.expandsByDrag = !floating
     val ready = state as? PlayerUiState.Ready
     val related = ready?.related.orEmpty()
     // The sponsor segments, drawn on the seek bar and the progress lines.
@@ -395,7 +399,7 @@ internal fun PlayerSheet(
                         onExpand = vm::expand,
                         onPlayPause = vm::playPause,
                         onClose = vm::close,
-                        modifier = Modifier.graphicsLayer { alpha = fadeIn() }.sheetDrag(sheet),
+                        modifier = Modifier.graphicsLayer { alpha = fadeIn() }.sheetDrag(sheet).moveAndResize(mini, sheet),
                     )
                 } else if (showMini && !fullscreen) {
                     val (title, subtitle) = when (state) {
@@ -458,17 +462,21 @@ internal fun PlayerSheet(
         val lineH = 2.dp.roundToPx()
 
         if (floating) {
-            // The video card in the bottom corner, just above the tabs' navigation bar (the
-            // screen's MiniPlayerSlot marks its top) or the system bar.
-            val margin = FloatingMiniMargin.roundToPx()
+            // The video card where it was left (FloatingMini): anywhere in the safe area above
+            // the tabs' navigation bar (the screen's MiniPlayerSlot marks its top) or the
+            // system bar. Until it's moved, in the bottom corner, about a third as wide as that.
+            val margin = FloatingMiniMargin.toPx()
             val navTop = dock.top ?: (h - navigationBars.getBottom(this))
-            val cardW = (innerW * 0.3f).roundToInt()
-                .coerceIn(FloatingMiniMinWidth.roundToPx(), FloatingMiniMaxWidth.roundToPx())
-                .coerceAtMost((innerW - 2 * margin).coerceAtLeast(1))
-            val cardH = cardW * 9 / 16
-            val cardLeft = w - right - margin - cardW
-            val cardTop = (navTop - margin - cardH).coerceIn(0, (h - cardH).coerceAtLeast(0))
-            sheet.range = cardTop.coerceAtLeast(1).toFloat()
+            val room = Rect(left + margin, top + margin, w - right - margin, navTop - margin)
+            val usualWidth = (innerW * 0.3f).coerceIn(FloatingMiniMinWidth.toPx(), FloatingMiniMaxWidth.toPx())
+            val card = mini.place(room, usualWidth, density)
+            val cardW = card.width.roundToInt().coerceAtLeast(1)
+            val cardH = card.height.roundToInt().coerceAtLeast(1)
+            val cardLeft = card.left.roundToInt()
+            val cardTop = card.top.roundToInt()
+            // How far dragging the full-size player down goes to minimize it: at least a third
+            // of the window, even with the card near the top.
+            sheet.range = cardTop.coerceAtLeast(h / 3).coerceAtLeast(1).toFloat()
 
             // Full size, the video has room around it, and rounded corners (videoCard), like
             // YouTube's on big screens: its left edge lines up with the text under it.

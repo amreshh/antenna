@@ -24,7 +24,7 @@ class RecommenderTest {
     ) = Recommender.build(
         history, subscribed, seed = 1L, channelUploads = uploads, now = NOW,
         outcomes = Recommender.outcomes(history, spans, NOW), feedback = feedback, shown = shown,
-    )
+    ).videos
 
     private fun List<VideoItem>.urls() = map { it.url }
 
@@ -106,7 +106,7 @@ class RecommenderTest {
             watched(video(3, channel = "fav")),
             watched(video(4, channel = "fav")),
         )
-        val result = Recommender.build(h, emptySet(), seed = 1L, now = NOW).urls()
+        val result = Recommender.build(h, emptySet(), seed = 1L, now = NOW).videos.urls()
         assertTrue(result.indexOf(video(10).url) < result.indexOf(video(11).url))
     }
 
@@ -314,5 +314,64 @@ class RecommenderTest {
     fun `a video you opened wasn't passed over`() {
         val h = history(*twoLists, watched(video(10), fraction = 0.3, daysAgo = 2.0))
         assertEquals(video(10).url, build(h, shown = mapOf(id(10) to 4)).first().url)
+    }
+
+    // --- Further pages ---------------------------------------------------------------
+
+    /** For you with [more] pages after the first: the up next lists fetched for each. */
+    private fun withPages(
+        history: Map<String, WatchEntry>,
+        more: List<List<List<VideoItem>>>,
+        feedback: ForYouFeedback = ForYouFeedback(),
+    ) = Recommender.build(
+        history, emptySet(), seed = 1L, now = NOW,
+        outcomes = Recommender.outcomes(history, emptyList(), NOW), feedback = feedback, more = more,
+    )
+
+    /** Ten watched videos with 20 suggestions each: 200 in all. */
+    private val tenLists = history(
+        *(1..10).map { n -> watched(video(n), daysAgo = n.toDouble(), related = (1..20).map { j -> video(1000 + n * 20 + j) }) }
+            .toTypedArray(),
+    )
+
+    @Test
+    fun `the first page has 150, and the next ones what's left, 40 at a time`() {
+        val first = withPages(tenLists, more = emptyList())
+        assertEquals(150, first.videos.size)
+        assertEquals(50, first.left)
+        val second = withPages(tenLists, more = listOf(emptyList()))
+        assertEquals(first.videos, second.videos.take(150)) // the first page stays as it was
+        assertEquals(190, second.videos.distinctBy { it.url }.size)
+        assertEquals(10, second.left)
+        assertEquals(200, withPages(tenLists, more = listOf(emptyList(), emptyList())).videos.size)
+    }
+
+    @Test
+    fun `a page's fetched up next lists add new suggestions after what's there`() {
+        val h = history(watched(video(1), related = listOf(video(10), video(11))))
+        val first = withPages(h, more = emptyList())
+        assertEquals(0, first.left)
+        val second = withPages(h, more = listOf(listOf(listOf(video(11), video(20), video(21)))))
+        assertEquals(first.videos.urls(), second.videos.take(2).urls())
+        assertEquals(setOf(video(20).url, video(21).url), second.videos.drop(2).urls().toSet())
+        assertEquals(1, second.pages)
+    }
+
+    @Test
+    fun `a suggestion in several fetched lists comes first on its page`() {
+        val h = history(watched(video(1), related = listOf(video(10))))
+        val lists = listOf(listOf(video(20), video(30)), listOf(video(21), video(30)), listOf(video(22), video(30)))
+        assertEquals(video(30).url, withPages(h, more = listOf(lists)).videos[1].url)
+    }
+
+    @Test
+    fun `further pages leave out what For you leaves out`() {
+        val h = history(
+            watched(video(1), related = listOf(video(10))),
+            watched(video(20), fraction = 1.0, daysAgo = 1.0),
+        )
+        val feedback = ForYouFeedback(notInterested = mapOf(id(21) to NotInterested(id(21), channelUrl("chan21"), "chan21", NOW)))
+        val result = withPages(h, more = listOf(listOf(listOf(video(20), video(21), video(22)))), feedback = feedback)
+        assertEquals(listOf(video(10).url, video(22).url), result.videos.urls())
     }
 }

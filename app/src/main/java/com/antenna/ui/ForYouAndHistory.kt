@@ -44,8 +44,17 @@ import com.antenna.data.HiddenChannel
 import com.antenna.data.NotInterested
 import com.antenna.data.Outcome
 import com.antenna.data.Prefetcher
+import com.antenna.data.Recommendations
 import com.antenna.data.Recommender
 import com.antenna.data.ShownInForYou
+import com.antenna.data.YouTubeRepository
+import com.antenna.data.toVideoItem
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.asStateFlow
+import org.schabi.newpipe.extractor.stream.StreamInfoItem
 import com.antenna.data.SubscriptionStore
 import com.antenna.data.VideoItem
 import com.antenna.data.WatchEntry
@@ -97,18 +106,19 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
     }.distinctUntilChanged(::sameForRecommendations)
 
     /** The recommendations; null until the history has loaded. */
-    val items: StateFlow<List<VideoItem>?> =
+    val list: StateFlow<Recommendations?> =
         combine(inputs, subscriptions.channels, channelUploads, feedbackStore.feedback) { input, channels, uploads, feedback ->
             input?.let {
-                Recommender.build(
+                val built = Recommender.build(
                     it.history, channels.map { c -> c.name }.toSet(), it.load.seed, uploads,
-                    outcomes = it.outcomes, feedback = feedback, shown = it.load.shown,
-                ).withAvatars(it.history, channels)
+                    outcomes = it.outcomes, feedback = feedback, shown = it.load.shown, more = it.load.more,
+                )
+                built.copy(videos = built.videos.withAvatars(it.history, channels))
             }
         }
             // What's at the top is what you're likely to tap: guesses for Prefetcher.
-            .onEach { list ->
-                if (list == null) return@onEach
+            .onEach { built ->
+                val list = built?.videos ?: return@onEach
                 Prefetcher.get(app).shows(GuessReason.ForYou, list)
                 if (guessOnLoad) {
                     guessOnLoad = false
@@ -117,6 +127,23 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
             }
             .flowOn(Dispatchers.Default)
             .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), null)
+
+    private val _more = MutableStateFlow(MorePages())
+
+    /** How loading the list's next page is going (loadMore). */
+    val more: StateFlow<MorePages> = _more.asStateFlow()
+    private var moreJob: Job? = null
+
+    /** Pages in a row that fetched up next lists and still added nothing. */
+    private var emptyPages = 0
+
+    /**
+     * Up next lists fetched for further pages, by video id, the [UP_NEXT_KEPT] used last: a
+     * reload's pages use them again rather than fetch them again.
+     */
+    private val upNext = object : LinkedHashMap<String, List<VideoItem>>(16, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, List<VideoItem>>) = size > UP_NEXT_KEPT
+    }
 
     init {
         viewModelScope.launch {
@@ -138,8 +165,72 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
 
     /** A new shuffle, with what you've passed over so far counting against it; [guess]: and Prefetcher guesses from its top. */
     private fun reload(guess: Boolean = true) {
+        moreJob?.cancel()
+        _more.value = MorePages()
+        emptyPages = 0
         guessOnLoad = guess
         load.value = ListLoad(seed = System.currentTimeMillis(), shown = shownStore.counts())
+    }
+
+    /**
+     * The end of the list is on screen: its next page. From the suggestions left out of it,
+     * when there are a page's worth; otherwise with more of them, from the up next lists of
+     * its top videos you haven't opened (YouTube's own "more like this"), [EXPAND_PER_PAGE] a
+     * page. A page that fetched some and still added nothing happens [MAX_EMPTY_PAGES] times
+     * in a row at most: then the list ends there, until it loads again.
+     */
+    fun loadMore() {
+        val current = load.value ?: return
+        val now = list.value ?: return
+        if (moreJob?.isActive == true || _more.value.ended || now.pages != current.more.size) return
+        _more.value = MorePages(loading = true)
+        moreJob = viewModelScope.launch {
+            try {
+                val (expanded, lists) = if (now.left >= Recommender.PAGE_SIZE) emptyList<String>() to emptyList()
+                else expand(now.videos, current.expanded)
+                if (expanded.isEmpty() && now.left == 0) {
+                    _more.value = MorePages(ended = true) // nothing left, and nothing to ask for more of
+                    return@launch
+                }
+                if (load.value !== current) return@launch // loaded again meanwhile
+                val next = current.withPage(expanded, lists)
+                load.value = next
+                val built = list.first { it != null && it.pages == next.more.size }!!
+                emptyPages = if (lists.isNotEmpty() && built.videos.size <= now.videos.size) emptyPages + 1 else 0
+                _more.value = MorePages(ended = emptyPages >= MAX_EMPTY_PAGES)
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                _more.value = MorePages(error = e.readable())
+            }
+        }
+    }
+
+    /**
+     * The first [EXPAND_PER_PAGE] of [videos] not expanded yet ([expanded]) and not opened
+     * (their up next lists are in the history already), and their up next lists. One whose
+     * list doesn't come (gone, age-restricted…) is passed over; when none comes, what went
+     * wrong with the first is thrown.
+     */
+    private suspend fun expand(videos: List<VideoItem>, expanded: Set<String>): Pair<List<String>, List<List<VideoItem>>> =
+        coroutineScope {
+            val opened = history.entries.value
+            val picks = videos.asSequence()
+                .mapNotNull { v -> videoIdOf(v.url)?.let { it to v } }
+                .filter { (id, _) -> id !in expanded && id !in opened }
+                .take(EXPAND_PER_PAGE)
+                .toList()
+            val got = picks.map { (id, v) -> async { runCatching { upNextOf(id, v) } } }.awaitAll()
+            got.firstOrNull { it.isFailure }?.takeIf { got.all { r -> r.isFailure } }?.let { throw it.exceptionOrNull()!! }
+            picks.map { it.first } to got.mapNotNull { it.getOrNull() }
+        }
+
+    /** [video]'s up next list ([id] is its id): kept from before, or fetched with its details (then opening it is quick). */
+    private suspend fun upNextOf(id: String, video: VideoItem): List<VideoItem> {
+        upNext[id]?.let { return it }
+        val info = YouTubeRepository.streamInfo(video.url)
+        return info.relatedItems.filterIsInstance<StreamInfoItem>().map { it.toVideoItem() }
+            .also { upNext[id] = it }
     }
 
     /** The tab is on the screen. Back after [RELOAD_AFTER_MS] or more, the list loads afresh, like YouTube's home page. */
@@ -194,16 +285,33 @@ class ForYouViewModel(app: Application) : AndroidViewModel(app) {
     private companion object {
         const val UPLOADS_MAX_AGE_MS = 30 * 60 * 1000L
         const val RELOAD_AFTER_MS = 30 * 60 * 1000L
+
+        /** Videos whose up next lists are fetched for a page, when the suggestions left aren't enough for it. */
+        const val EXPAND_PER_PAGE = 3
+        const val MAX_EMPTY_PAGES = 3
+        const val UP_NEXT_KEPT = 100
     }
 }
+
+/** How loading For you's next page is going: [error] says why the last didn't load; after [ended], none do. */
+data class MorePages(val loading: Boolean = false, val error: String? = null, val ended: Boolean = false)
 
 /**
  * One load of the For you list: its shuffle, and on how many days each video had been shown
  * when it loaded. Both change only when it loads again (the app starting, pulling down, or
  * coming back to the tab after a while), so the videos you scroll past don't move the list
- * under your finger.
+ * under your finger. Scrolled to its end, it gets pages added ([more]: the up next lists
+ * fetched for each, of the videos in [expanded]).
  */
-private class ListLoad(val seed: Long, val shown: Map<String, Int>)
+private class ListLoad(
+    val seed: Long,
+    val shown: Map<String, Int>,
+    val more: List<List<List<VideoItem>>> = emptyList(),
+    val expanded: Set<String> = emptySet(),
+) {
+    /** This load with one more page, for which [lists], the up next lists of [ids], were fetched. */
+    fun withPage(ids: List<String>, lists: List<List<VideoItem>>) = ListLoad(seed, shown, more + listOf(lists), expanded + ids)
+}
 
 /** What the For you list is built from: the history, how each video in it went, and the load. */
 private class ListInputs(val history: Map<String, WatchEntry>, val outcomes: Map<String, Outcome>, val load: ListLoad)
@@ -257,7 +365,8 @@ fun ForYouTab(
         vm.onTabShown()
         onPauseOrDispose { vm.onTabHidden() }
     }
-    val items = vm.items.collectAsStateWithLifecycle().value ?: return // the history is still loading
+    val items = vm.list.collectAsStateWithLifecycle().value?.videos ?: return // the history is still loading
+    val more by vm.more.collectAsStateWithLifecycle()
     val snackbar = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
 
@@ -310,6 +419,8 @@ fun ForYouTab(
                         onShown = vm::onShown,
                         moreOptions = moreOptions,
                     )
+                    // Like YouTube's home page: the next ones load as you reach the end.
+                    if (!more.ended) loadMoreItem(more.loading, more.error, loaded = items.size, vm::loadMore, inset = if (wide) 0.dp else 16.dp)
                 }
             }
         }
