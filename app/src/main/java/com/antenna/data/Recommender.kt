@@ -20,6 +20,15 @@ enum class Watched {
 /** How a video in your history went, and how far into it you got at most (0 to 1). */
 data class Outcome(val watched: Watched, val fraction: Float)
 
+/** For you's list, as [Recommender.build] makes it. */
+data class Recommendations(
+    val videos: List<VideoItem>,
+    /** How many pages it has after the first (each up to [Recommender.PAGE_SIZE] videos). */
+    val pages: Int,
+    /** Suggestions not in it yet: with a page's worth, the next page needs no up next lists fetched. */
+    val left: Int,
+)
+
 /**
  * Builds the "For you" list without a Google account.
  *
@@ -39,13 +48,27 @@ data class Outcome(val watched: Watched, val fraction: Float)
  *  - left out: videos you finished or left early, the ones you marked Not interested, and
  *    the channels you said not to recommend ([ForYouFeedback])
  *  - no channel gets more than a few spots near the top
+ *
+ * Scrolled to its end, the list goes on a page at a time, like YouTube's home page: with the
+ * suggestions that didn't make it into the first [MAX_RESULTS], then, once those run low,
+ * with the up next lists of videos it shows, fetched for that page (ForYouViewModel.loadMore).
+ * Each page is ranked from what isn't in the list yet, so the pages above it stay as they are.
  */
 object Recommender {
 
     /** How many recent videos' "up next" lists are blended (older ones count less). */
     private const val RECENT_SOURCES = 100
     private const val MAX_RESULTS = 150
+
+    /** How many videos each page after the first has, at most. */
+    const val PAGE_SIZE = 40
     private const val MAX_PER_CHANNEL_UP_TOP = 3
+
+    /**
+     * What an up next list fetched for a further page counts for. It's of a video you haven't
+     * opened, so less than one you watched (0.04 to 1.4, by how recently, and how far into it).
+     */
+    private const val SECOND_HAND = 0.2
 
     /** A watch counts half as much towards a channel after this many days. */
     private const val AFFINITY_HALF_LIFE_DAYS = 60.0
@@ -161,7 +184,12 @@ object Recommender {
         feedback: ForYouFeedback = ForYouFeedback(),
         /** On how many recent days each video was shown here ([ShownInForYou]). */
         shown: Map<String, Int> = emptyMap(),
-    ): List<VideoItem> {
+        /**
+         * The pages after the first: for each, the up next lists of videos shown here that were
+         * fetched for it; none when the suggestions left were enough for it.
+         */
+        more: List<List<List<VideoItem>>> = emptyList(),
+    ): Recommendations {
         /** Not suggested: finished, left early, Not interested, or from a channel not to recommend. */
         fun leftOut(id: String, video: VideoItem): Boolean {
             val watched = outcomes[id]?.watched
@@ -213,26 +241,47 @@ object Recommender {
                 }
         }
 
-        val ranked = scores.entries
-            .map { (id, score) ->
-                val video = videos.getValue(id)
-                val subBoost = if (video.uploader in subscribedNames) 1.3 else 1.0
-                // shown here on earlier days and passed over (one you opened wasn't)
-                val passedOver = if (id in history) 1.0 else PASSED_OVER.pow(shown[id] ?: 0)
-                // stable per-video noise so pull-to-refresh reshuffles a little
-                val noise = 0.8 + Random(seed xor id.hashCode().toLong()).nextDouble() * 0.4
-                video to score * subBoost * lift(affinity.of(video)) * passedOver * noise
-            }
-            .sortedByDescending { it.second }
-            .map { it.first }
+        /** [ids]' videos, the best first, with no channel taking more than a few spots at the top. */
+        fun ranked(ids: Collection<String>): List<VideoItem> {
+            val best = ids
+                .map { id ->
+                    val video = videos.getValue(id)
+                    val subBoost = if (video.uploader in subscribedNames) 1.3 else 1.0
+                    // shown here on earlier days and passed over (one you opened wasn't)
+                    val passedOver = if (id in history) 1.0 else PASSED_OVER.pow(shown[id] ?: 0)
+                    // stable per-video noise so pull-to-refresh reshuffles a little
+                    val noise = 0.8 + Random(seed xor id.hashCode().toLong()).nextDouble() * 0.4
+                    video to scores.getValue(id) * subBoost * lift(affinity.of(video)) * passedOver * noise
+                }
+                .sortedByDescending { it.second }
+                .map { it.first }
 
-        // Diversify: cap how often one channel appears before the rest of the list.
-        val perChannel = HashMap<String, Int>()
-        val (top, overflow) = ranked.partition { v ->
-            val n = perChannel.merge(v.uploader, 1) { a, b -> a + b }!!
-            n <= MAX_PER_CHANNEL_UP_TOP
+            // Diversify: cap how often one channel appears before the rest of the list.
+            val perChannel = HashMap<String, Int>()
+            val (top, overflow) = best.partition { v ->
+                val n = perChannel.merge(v.uploader, 1) { a, b -> a + b }!!
+                n <= MAX_PER_CHANNEL_UP_TOP
+            }
+            return top + overflow
         }
-        return (top + overflow).take(MAX_RESULTS)
+
+        val list = ranked(scores.keys).take(MAX_RESULTS).toMutableList()
+        val placed = list.mapNotNullTo(HashSet()) { videoIdOf(it.url) }
+        more.forEach { lists ->
+            // The page's own up next lists, then the best of what isn't in the list yet.
+            lists.forEach { upNext ->
+                upNext.forEachIndexed { j, video ->
+                    val id = videoIdOf(video.url) ?: return@forEachIndexed
+                    if (id in placed || leftOut(id, video)) return@forEachIndexed
+                    scores[id] = (scores[id] ?: 0.0) + SECOND_HAND / (1 + j * 0.12)
+                    videos.putIfAbsent(id, video)
+                }
+            }
+            val page = ranked(scores.keys - placed).take(PAGE_SIZE)
+            list += page
+            page.forEach { v -> videoIdOf(v.url)?.let(placed::add) }
+        }
+        return Recommendations(list, pages = more.size, left = scores.size - placed.size)
     }
 
     /** How much you like each channel: by its link, and by its name for up next lists saved before they had links. */

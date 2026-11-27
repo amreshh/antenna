@@ -84,6 +84,7 @@ import com.antenna.data.Channel
 import com.antenna.data.Prefs
 import com.antenna.data.VideoItem
 import com.antenna.data.WatchHistoryStore
+import com.antenna.data.channelFeed
 import com.antenna.data.videoIdOf
 
 /** How long a channel stays picked before Prefetcher guesses its next video: not for channels passed through. */
@@ -160,11 +161,15 @@ fun FeedTab(
         picked = url
     }
 
-    val visible = remember(state.items, watched, hideWatched, selected, channels) {
+    val channelVideos by vm.channelVideos.collectAsStateWithLifecycle()
+    /** The picked channel's Videos tab as far as it's loaded: it goes back further than its feed. */
+    val more = selected?.let { channelVideos[it] ?: ChannelVideos() }
+    val visible = remember(state.items, more?.videos, watched, hideWatched, selected, channels) {
         // The feed doesn't come with avatars, but the subscriptions mostly have them.
         val avatars = channels.associate { it.url to it.avatarUrl }
-        state.items
-            .filter { selected == null || it.channelUrl == selected }
+        val shown = if (selected == null) state.items
+        else channelFeed(state.items.filter { it.channelUrl == selected }, more?.videos.orEmpty())
+        shown
             .filterNot { v -> hideWatched && videoIdOf(v.url)?.let { it in watched } == true }
             .map { v -> if (v.channelAvatarUrl != null) v else v.copy(channelAvatarUrl = avatars[v.channelUrl]) }
     }
@@ -177,6 +182,8 @@ fun FeedTab(
             onShowShorts = { showShorts = it },
             onRefresh = vm::refresh, onOpenVideo = onOpenVideo, onOpenChannel = onOpenChannel,
             onVideoShown = vm::lengthWanted,
+            more = more,
+            onLoadMore = { selected?.let(vm::loadMoreVideos) },
             modifier = m,
         )
     }
@@ -378,7 +385,8 @@ private fun NewUploadsDot(ring: Color, modifier: Modifier = Modifier) {
 /**
  * The feed, newest first: its videos, or its Shorts (picked in the chips above, when there are
  * any), with the refresh progress and any errors at the top. [onVideoShown] hears of each
- * video as it comes on screen (to fill in its length).
+ * video as it comes on screen (to fill in its length). With a channel picked, [more] is its
+ * Videos tab: the end of its videos coming on screen loads more of them ([onLoadMore]).
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -392,6 +400,8 @@ private fun FeedGrid(
     onOpenVideo: OpenVideo,
     onOpenChannel: (Channel) -> Unit,
     onVideoShown: (VideoItem) -> Unit,
+    more: ChannelVideos?,
+    onLoadMore: () -> Unit,
     modifier: Modifier,
 ) {
     PullToRefreshBox(isRefreshing = state.refreshing, onRefresh = onRefresh, modifier = modifier) {
@@ -414,6 +424,10 @@ private fun FeedGrid(
                         onChannelClick = onOpenChannel,
                         onShown = onVideoShown,
                     )
+                    // Until all of the picked channel's Videos tab is loaded.
+                    if (more != null && (more.hasMore || more.loading || more.error != null)) {
+                        loadMoreItem(more.loading, more.error, loaded = more.videos.size, onLoadMore, inset = if (wide) 0.dp else 16.dp)
+                    }
                 }
             }
         }

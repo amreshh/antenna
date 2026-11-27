@@ -68,9 +68,11 @@
   controls are hidden, a thin line along the bottom of the video shows how far in you are,
   with the sponsor segments in green.
 - **Mini player, like YouTube:** swipe the video down (or press Back) and it shrinks into a
-  bar above the tabs (on tablets, a floating video in the bottom corner) and keeps playing
-  while you search and browse. Tap it or swipe it up to bring it back; it has play/pause and
-  close buttons. Leaving the app pauses it.
+  bar above the tabs and keeps playing while you search and browse. Tap it or swipe it up to
+  bring it back; it has play/pause and close buttons. Leaving the app pauses it. On tablets it's
+  a floating video, in the bottom corner until you move it: drag it anywhere above the tabs, and
+  pinch it or drag one of its bottom corners to resize it (a mouse gets a resize arrow there).
+  It stays where you left it, at that size, next time; tap it to bring the player back.
 - **The controls, like YouTube's:** no dark bar along the bottom of the video, but the time in a
   pill on the left, and ⚙ and fullscreen in one on the right, under the seek bar. **⚙** opens
   **Quality**, where Auto plays the best quality up to the max set in Settings and shows which
@@ -128,7 +130,9 @@
   else. Shorts are kept apart: the feed shows the
   other videos, and the Shorts chip above them shows the Shorts, in a grid of tall
   thumbnails. On tablets your channels are
-  listed beside them, by new activity, A–Z or category; tap one to see only its videos. A blue
+  listed beside them, by new activity, A–Z or category; tap one to see only its videos, as far
+  back as you scroll: the feed has each channel's last 15 uploads, Shorts among them, so the
+  rest come from the channel's Videos tab, 30 at a time. A blue
   dot, like YouTube's, marks a channel with an upload from the last week that wasn't there yet
   when you last opened it in that list. In the New activity order the channels with a dot come
   first; the one you open stays where it is until you pick another, then goes down with the ones
@@ -226,9 +230,15 @@ account flagged. So Antenna builds its own version from YouTube's recommendation
      recommend channel** removes a channel's videos, both with Undo. The Analytics tab lists them
      (Not interested), to show them again.
 4. Videos you've finished are left out, and no channel gets more than 3 spots near the top.
+5. Scrolled to the end, it keeps going a page at a time, like YouTube's home page: first with
+   the suggestions that didn't make the first 150, then, once fewer than a page are left, with
+   the Up next lists of its top videos you haven't opened, 3 a page (YouTube's own "more like
+   this"; opening one of those is then quick). Each page is ranked from what isn't in the list
+   yet, so what's above it doesn't move.
 
 All of it stays on the phone. The only requests are the RSS feeds of the channels you watch most
-but don't subscribe to, one small request each. To tune it, change the weights in `Recommender.kt`.
+but don't subscribe to, one small request each, and the Up next lists fetched for further pages.
+To tune it, change the weights in `Recommender.kt`.
 
 ## Importing your YouTube subscriptions
 
@@ -364,10 +374,10 @@ app/src/main/java/com/antenna/
 ├── data/YouTubeRepository.kt     search, pagination, stream info
 ├── data/Prefs.kt                 settings (skip categories, max quality)
 ├── data/Subscriptions.kt         local subscription store + Takeout CSV import
-├── data/FeedRepository.kt        builds the feed (channel RSS, falls back to the Videos tab)
+├── data/FeedRepository.kt        builds the feed (channel RSS, falls back to the Videos tab), pages a channel's Videos tab
 ├── data/NewUploads.kt            which uploads you've seen: the channel list's blue dots
 ├── data/WatchHistory.kt          watch progress + saved "up next" lists (local JSON file)
-├── data/Recommender.kt           ranks the For you tab from your history
+├── data/Recommender.kt           ranks the For you tab from your history, a page at a time
 ├── player/StreamPicker.kt        picks the best video-only + audio stream and merges them
 ├── player/YoutubeDataSource.kt   fetches stream bytes the way YouTube expects (POST, rn, range, chunks)
 ├── player/SeekBarSegments.kt     draws the SponsorBlock segments on the seek bar

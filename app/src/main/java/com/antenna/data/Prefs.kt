@@ -49,6 +49,15 @@ class Prefs(context: Context) {
         get() = sp.getBoolean(KEY_PREFETCH, true)
         set(value) = sp.edit { putBoolean(KEY_PREFETCH, value) }
 
+    /** Where the floating mini player was left (big screens), and how big. */
+    var miniPlayer: MiniPlayerPlace
+        get() = MiniPlayerPlace(sp.getFloat(KEY_MINI_X, 1f), sp.getFloat(KEY_MINI_Y, 1f), sp.getFloat(KEY_MINI_WIDTH, 0f))
+        set(value) = sp.edit {
+            putFloat(KEY_MINI_X, value.x)
+            putFloat(KEY_MINI_Y, value.y)
+            putFloat(KEY_MINI_WIDTH, value.widthDp)
+        }
+
     companion object {
         /** [maxHeightMetered]: no lower limit on mobile data. */
         const val SAME_AS_WIFI = 0
@@ -59,5 +68,15 @@ class Prefs(context: Context) {
         private const val KEY_CATEGORIES = "sb_categories"
         private const val KEY_MAX_HEIGHT = "max_height"
         private const val KEY_REPORT_SKIPS = "sb_report_skips"
+        private const val KEY_MINI_X = "mini_player_x"
+        private const val KEY_MINI_Y = "mini_player_y"
+        private const val KEY_MINI_WIDTH = "mini_player_width"
     }
 }
+
+/**
+ * Where the floating mini player is, as fractions of the room it can move in ([x], [y]: 0 at
+ * the left or top, 1 at the right or bottom, so it stays by the same edges when the window
+ * changes), and its width in dp: 0 until it's resized, for its usual size.
+ */
+data class MiniPlayerPlace(val x: Float = 1f, val y: Float = 1f, val widthDp: Float = 0f)
